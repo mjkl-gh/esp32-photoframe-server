@@ -40,6 +40,15 @@ func (s *AuthService) UserCount() (int64, error) {
 	return count, err
 }
 
+// GetPrimaryUser returns the oldest user account, used for trusted ingress sessions.
+func (s *AuthService) GetPrimaryUser() (*model.User, error) {
+	var user model.User
+	if err := s.db.Order("id ASC").First(&user).Error; err != nil {
+		return nil, err
+	}
+	return &user, nil
+}
+
 func (s *AuthService) Register(username, password string) error {
 	// Check if user exists
 	var count int64

@@ -5,11 +5,12 @@ import { api } from '../api';
 export const useAuthStore = defineStore('auth', () => {
   const token = ref<string | null>(localStorage.getItem('token'));
   const isInitialized = ref<boolean>(false);
+  const isIngress = ref<boolean>(false);
   const loading = ref<boolean>(false);
   const error = ref<string | null>(null);
   const tokens = ref<any[]>([]);
 
-  const isLoggedIn = computed(() => !!token.value);
+  const isLoggedIn = computed(() => !!token.value || isIngress.value);
 
   function setToken(newToken: string) {
     token.value = newToken;
@@ -26,8 +27,10 @@ export const useAuthStore = defineStore('auth', () => {
       loading.value = true;
       const res = await api.get('auth/status');
       isInitialized.value = res.data.initialized;
+      isIngress.value = !!res.data.ingress;
     } catch (err: any) {
       console.error('Failed to check status', err);
+      isIngress.value = false;
     } finally {
       loading.value = false;
     }
@@ -65,6 +68,7 @@ export const useAuthStore = defineStore('auth', () => {
     token,
     tokens,
     isInitialized,
+    isIngress,
     isLoggedIn,
     loading,
     error,
