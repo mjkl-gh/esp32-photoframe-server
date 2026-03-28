@@ -49,6 +49,22 @@ The easiest way to run the server is as a Home Assistant add-on.
    - Enable **Start on boot** if desired
    - Access via the sidebar or `http://homeassistant.local:9607`
 
+#### Ingress Authentication
+
+When accessing the UI through the Home Assistant sidebar (Ingress), this add-on now skips the app login screen.
+
+- Home Assistant authentication is trusted for ingress requests.
+- JWT login is still required for non-ingress/direct access (for example `http://homeassistant.local:9607`).
+- Ingress bypass is only enabled when both checks pass:
+   - Request includes `X-Ingress-Path`
+   - TCP socket source IP (`RemoteAddr`) matches the trusted ingress proxy IP (default: `172.30.32.2`)
+
+If your Home Assistant environment uses a different ingress proxy IP, set this environment variable for the container:
+
+```bash
+HA_INGRESS_PROXY_IP=<your-supervisor-ingress-ip>
+```
+
 #### Data Migration
 
 If upgrading from a previous version that used `/config/esp32-photoframe-server/`:

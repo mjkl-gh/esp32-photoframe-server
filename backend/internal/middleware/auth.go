@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/aitjcize/esp32-photoframe-server/backend/internal/security"
 	"github.com/aitjcize/esp32-photoframe-server/backend/internal/service"
 	"github.com/labstack/echo/v4"
 )
@@ -11,6 +12,17 @@ import (
 func JWTMiddleware(authService *service.AuthService) echo.MiddlewareFunc {
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c echo.Context) error {
+			if security.IsTrustedIngressRequest(c) {
+				user, err := authService.GetPrimaryUser()
+				if err != nil {
+					return c.JSON(http.StatusUnauthorized, map[string]string{"error": "no user account configured"})
+				}
+
+				c.Set("user_id", user.ID)
+				c.Set("username", user.Username)
+				return next(c)
+			}
+
 			// Extract token
 			tokenString := extractToken(c)
 			if tokenString == "" {

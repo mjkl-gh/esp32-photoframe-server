@@ -3,6 +3,7 @@ package handler
 import (
 	"net/http"
 
+	"github.com/aitjcize/esp32-photoframe-server/backend/internal/security"
 	"github.com/aitjcize/esp32-photoframe-server/backend/internal/service"
 	"github.com/labstack/echo/v4"
 )
@@ -70,9 +71,11 @@ func (h *AuthHandler) GetStatus(c echo.Context) error {
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "database error"})
 	}
+	isIngress := security.IsTrustedIngressRequest(c)
 
 	return c.JSON(http.StatusOK, map[string]bool{
 		"initialized": count > 0,
+		"ingress":     isIngress,
 	})
 }
 
