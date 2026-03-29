@@ -592,6 +592,12 @@
                         <v-btn
                           block
                           variant="outlined"
+                          :loading="immichStore.loading"
+                          @click="loadImmichAlbums"
+                          >Refresh Albums</v-btn
+                        >
+                      </v-col>
+                    </v-row>
 
                     <v-row class="mt-1">
                       <v-col cols="12" md="6">
@@ -618,12 +624,6 @@
                           persistent-hint
                           @update:model-value="saveSettingsInternal()"
                         ></v-select>
-                      </v-col>
-                    </v-row>
-                          :loading="immichStore.loading"
-                          @click="loadImmichAlbums"
-                          >Refresh Albums</v-btn
-                        >
                       </v-col>
                     </v-row>
 
