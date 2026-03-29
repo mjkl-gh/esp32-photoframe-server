@@ -33,12 +33,12 @@ The easiest way to run the server is as a Home Assistant add-on.
 
 1. **Add Repository**:
    - Go to **Settings** → **Add-ons** → **Add-on Store** → **⋮** (three dots) → **Repositories**
-   - Add: `https://github.com/aitjcize/esp32-photoframe-server`
+   - Add: `https://github.com/mjkl-gh/esp32-photoframe-server`
 
 2. **Install Add-on**:
    - Find "ESP32 PhotoFrame Server" in the add-on store
    - Click **Install**
-   - Wait for the build to complete (5-15 minutes on first install)
+   - Home Assistant pulls the prebuilt image from GHCR (usually much faster than local builds)
 
 3. **Configure**:
    - The add-on uses `/data` for persistent storage (automatically backed up)
