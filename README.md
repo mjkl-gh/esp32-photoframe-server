@@ -38,8 +38,7 @@ The easiest way to run the server is as a Home Assistant add-on.
 2. **Install Add-on**:
    - Find "ESP32 PhotoFrame Server" in the add-on store
    - Click **Install**
-   - Home Assistant pulls the prebuilt image from GHCR (usually much faster than local builds)
-
+   - Home Assistant pulls the prebuilt image from GHCR
 3. **Configure**:
    - The add-on uses `/data` for persistent storage (automatically backed up)
    - Port 9607 is exposed for direct device access
@@ -66,7 +65,7 @@ docker run -d \
   -p 9607:9607 \
   -v /path/to/data:/data \
   --name photoframe-server \
-  aitjcize/esp32-photoframe-server:latest
+   ghcr.io/mjkl-gh/esp32-photoframe-server:latest
 ```
 
 ## Configuration
