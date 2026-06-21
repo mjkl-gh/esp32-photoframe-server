@@ -23,7 +23,6 @@ type ImmichService struct {
 	client   *immich.Client
 	mu       sync.Mutex
 	autoSync *AutoSyncScheduler
-	autoSync *AutoSyncScheduler
 }
 
 func NewImmichService(db *gorm.DB, settings *SettingsService) *ImmichService {
@@ -240,10 +239,6 @@ func (s *ImmichService) ClearPhotos() error {
 
 // ClearAndResync deletes all Immich photos and re-imports from the configured album
 func (s *ImmichService) ClearAndResync() error {
-	return s.autoSync.SyncNow()
-}
-
-func (s *ImmichService) clearAndResyncInternal() error {
 	return s.autoSync.SyncNow()
 }
 
