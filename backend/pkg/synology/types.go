@@ -20,10 +20,15 @@ type Item struct {
 	FolderID    int    `json:"folder_id"`
 	Type        string `json:"type"` // "photo" or "video"
 	Additional  struct {
+		// Thumbnail: m/xl/sm are per-size status flags ("ready", "broken", ...),
+		// not keys. The thumbnail is stored under UnitID, which differs from the
+		// item ID for many newer items; CacheKey is "<unit_id>_<timestamp>".
 		Thumbnail struct {
-			M  string `json:"m"` // Cache key or similar
-			XL string `json:"xl"`
-			S  string `json:"s"`
+			M        string `json:"m"`
+			XL       string `json:"xl"`
+			S        string `json:"sm"`
+			CacheKey string `json:"cache_key"`
+			UnitID   int    `json:"unit_id"`
 		} `json:"thumbnail"`
 		Resolution struct {
 			Width  int `json:"width"`
@@ -46,4 +51,19 @@ type Album struct {
 	ID   int    `json:"id"`
 	Name string `json:"name"`
 	Type string `json:"type"` // "folder" or "album"
+	// Passphrase is returned for albums shared with the logged-in user and is
+	// required to browse them; empty for albums the user owns.
+	Passphrase string `json:"passphrase"`
+	// SharedWithMe is set by the server (not DSM) so the UI can tell an album
+	// someone shared with this account from one it owns — the two can have
+	// the same name.
+	SharedWithMe bool `json:"shared_with_me"`
+}
+
+// AlbumRef identifies an album to browse: its numeric id plus, for albums
+// shared with the logged-in user, the passphrase that grants access. The zero
+// value means "not scoped to an album".
+type AlbumRef struct {
+	ID         int
+	Passphrase string
 }

@@ -76,37 +76,73 @@ func NewImageHandler(deps ImageHandlerDeps) *ImageHandler {
 	}
 }
 
-func (h *ImageHandler) ServeImage(c echo.Context) error {
-	// Get source from route parameter
-	source := c.Param("source")
-
-	// 1. Identify Device and Determine Settings
-	// Three-tier identification: token DeviceID → X-Hostname → client IP
-	var device model.Device
-	deviceFound := false
-
-	// Tier 1: Token-based identification (works over internet)
-	if devID, ok := c.Get("device_id").(uint); ok && devID > 0 {
-		if err := h.db.First(&device, devID).Error; err == nil {
-			deviceFound = true
+// deviceBaseURL returns the base URL devices use to reach this server: the
+// admin-configured "Server URL for devices" setting when set, otherwise
+// derived from the incoming request (honoring X-Forwarded-Proto so URLs
+// behind a TLS-terminating reverse proxy keep the https scheme).
+func (h *ImageHandler) deviceBaseURL(c echo.Context) string {
+	if base, err := h.settings.Get("device_image_base_url"); err == nil {
+		if base = strings.TrimRight(strings.TrimSpace(base), "/"); base != "" {
+			return base
 		}
 	}
+	scheme := "http"
+	if c.Request().TLS != nil || c.Request().Header.Get("X-Forwarded-Proto") == "https" {
+		scheme = "https"
+	}
+	return scheme + "://" + c.Request().Host
+}
 
-	// Tier 2: X-Hostname header (backward compat, LAN setups)
-	if !deviceFound {
-		if hostname := c.Request().Header.Get("X-Hostname"); hostname != "" {
-			if err := h.db.Where("host = ?", hostname).First(&device).Error; err == nil {
-				deviceFound = true
+// identifyDevice resolves the requesting device SOLELY from its per-device
+// token (the device_id set by the auth middleware). The previous X-Hostname /
+// client-IP fallbacks were client-spoofable and have been removed — the token
+// is the single source of truth. Returns the device and whether one was found.
+func (h *ImageHandler) identifyDevice(c echo.Context) (model.Device, bool) {
+	var device model.Device
+	if devID, ok := c.Get("device_id").(uint); ok && devID > 0 {
+		if err := h.db.First(&device, devID).Error; err == nil {
+			return device, true
+		}
+	}
+	return device, false
+}
+
+func (h *ImageHandler) ServeImage(c echo.Context) error {
+	// 1. Identify the device from its token (the single source of truth).
+	device, deviceFound := h.identifyDevice(c)
+
+	// Record what the frame reports with each fetch (battery level and
+	// firmware version), so the dashboard can show the last known state
+	// even while the frame sleeps.
+	if deviceFound {
+		updates := map[string]interface{}{}
+		if batt, err := strconv.Atoi(c.Request().Header.Get("X-Battery-Percentage")); err == nil &&
+			batt >= 0 && batt <= 100 {
+			updates["battery_level"] = batt
+			updates["battery_reported_at"] = time.Now()
+		}
+		if fw := c.Request().Header.Get("X-Firmware-Version"); fw != "" && len(fw) <= 32 {
+			updates["firmware_version"] = fw
+		}
+		if len(updates) > 0 {
+			if uerr := h.db.Model(&model.Device{}).Where("id = ?", device.ID).Updates(updates).Error; uerr != nil {
+				log.Printf("Failed to store reported state for device %d: %v", device.ID, uerr)
 			}
 		}
 	}
 
-	// Tier 3: Client IP (backward compat, LAN setups)
-	if !deviceFound {
-		clientIP := c.RealIP()
-		if err := h.db.Where("host = ?", clientIP).First(&device).Error; err == nil {
-			deviceFound = true
-		}
+	// The image source is ALWAYS the device's server-side assignment. The
+	// /image/<source> path param is deliberately IGNORED so a device can never
+	// be served a source that isn't assigned to it. (Legacy /image/<source>
+	// URLs still route here for older firmware — the param is simply ignored.)
+	// A device with no source set gets a 400 until it's configured server-side.
+	source := ""
+	if deviceFound {
+		source = device.Source
+	}
+	if source == "" {
+		return respondError(c, http.StatusBadRequest,
+			"no image source configured for this device — set the device's Image Source in the server")
 	}
 
 	// Native resolution of the device panel
@@ -172,18 +208,56 @@ func (h *ImageHandler) ServeImage(c echo.Context) error {
 		logicalW, logicalH = logicalH, logicalW
 	}
 
+	// Parse X-Processing-Settings early: the firmware's synced scaleMode
+	// decides the layout for both the overlay renderer and the converter.
+	var settings *photoframe.ProcessingSettings
+	if settingsStr := c.Request().Header.Get("X-Processing-Settings"); settingsStr != "" {
+		settings = &photoframe.ProcessingSettings{}
+		if err := json.Unmarshal([]byte(settingsStr), settings); err != nil {
+			fmt.Printf("Failed to parse X-Processing-Settings header: %v\n", err)
+			settings = nil
+		}
+	}
+
+	// During a pending config sync (the device hasn't pulled the latest
+	// server-side edit yet) the header carries the device's OLD layout;
+	// substitute the newer server-stored values so this render doesn't put a
+	// stale layout on the panel until the next rotation.
+	if deviceFound && settings != nil {
+		deviceTS, tsErr := strconv.ParseInt(c.Request().Header.Get("X-Config-Last-Updated"), 10, 64)
+		if tsErr == nil && deviceTS < device.ConfigLastUpdated {
+			if raw := strings.TrimSpace(device.DeviceProcessingSettings); raw != "" && raw != "{}" {
+				var stored photoframe.ProcessingSettings
+				if err := json.Unmarshal([]byte(raw), &stored); err == nil {
+					settings.ScaleMode = stored.ScaleMode
+					settings.BackgroundColor = stored.BackgroundColor
+				}
+			}
+		}
+	}
+
 	layout := model.LayoutPhotoOverlay
 	displayMode := "cover"
+	backgroundColor := ""
 	showCalendar := false
 
 	if deviceFound {
 		if device.Layout != "" {
 			layout = device.Layout
 		}
+		// Legacy server-side fields double as the fallback for firmware that
+		// predates the device-synced scaleMode
 		if device.DisplayMode != "" {
 			displayMode = device.DisplayMode
 		}
+		backgroundColor = device.BackgroundColor
 		showCalendar = device.ShowCalendar
+	}
+	if settings != nil && settings.ScaleMode != "" {
+		displayMode = settings.ScaleMode
+	}
+	if settings != nil && settings.BackgroundColor != "" {
+		backgroundColor = settings.BackgroundColor
 	}
 
 	var img image.Image
@@ -210,7 +284,7 @@ func (h *ImageHandler) ServeImage(c echo.Context) error {
 	// (gallery, immich, synology, google_photos, url_proxy) — flow through
 	// the unified imagesource.Registry.
 	if !h.sources.Has(source) {
-		return c.JSON(http.StatusNotFound, map[string]string{"error": "invalid source"})
+		return respondError(c, http.StatusNotFound, "invalid source")
 	}
 	var devicePtr *model.Device
 	if deviceFound {
@@ -228,12 +302,12 @@ func (h *ImageHandler) ServeImage(c echo.Context) error {
 	})
 	if err != nil {
 		if strings.Contains(err.Error(), "invalid source filter") {
-			return c.JSON(http.StatusNotFound, map[string]string{"error": "invalid source"})
+			return respondError(c, http.StatusNotFound, "invalid source")
 		}
 		if errors.Is(err, gorm.ErrRecordNotFound) || strings.Contains(err.Error(), "record not found") {
-			return c.JSON(http.StatusNotFound, map[string]string{"error": "no photos found for this device"})
+			return respondError(c, http.StatusNotFound, "no photos found for this device")
 		}
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to fetch photo: " + err.Error()})
+		return respondError(c, http.StatusInternalServerError, "failed to fetch photo: "+err.Error())
 	}
 	img = sourceResp.Image
 	servedImageIDs := sourceResp.ImageIDs
@@ -252,11 +326,11 @@ func (h *ImageHandler) ServeImage(c echo.Context) error {
 		}
 		var buf bytes.Buffer
 		if err := png.Encode(&buf, out); err != nil {
-			return c.JSON(http.StatusInternalServerError, map[string]string{"error": "png encode: " + err.Error()})
+			return respondError(c, http.StatusInternalServerError, "png encode: "+err.Error())
 		}
 		body := buf.Bytes()
 
-		applyConfigSyncHeader(c, &device, deviceFound)
+		h.applyConfigSync(c, &device, deviceFound)
 
 		c.Response().Header().Set("Content-Length", fmt.Sprintf("%d", len(body)))
 		return c.Blob(http.StatusOK, "image/png", body)
@@ -362,7 +436,7 @@ func (h *ImageHandler) ServeImage(c echo.Context) error {
 			DateFormat:    device.DateFormat,
 		})
 		if renderErr != nil {
-			return c.JSON(http.StatusInternalServerError, map[string]string{"error": "render failed: " + renderErr.Error()})
+			return respondError(c, http.StatusInternalServerError, "render failed: "+renderErr.Error())
 		}
 	} else {
 		imgWithOverlay = img
@@ -377,6 +451,15 @@ func (h *ImageHandler) ServeImage(c echo.Context) error {
 	if orientation != "" {
 		procOptions["orientation"] = orientation
 	}
+	// Honor the device's fit/cover setting in the CLI. This matters when no
+	// overlay is rendered: the raw photo goes straight to epaper-image-convert,
+	// which would otherwise default to cover and crop. (With an overlay, the
+	// renderer already composed the photo at panel dimensions, so the CLI
+	// scale is a no-op either way.)
+	procOptions["scale-mode"] = displayMode
+	if displayMode == "fit" && backgroundColor != "" {
+		procOptions["background-color"] = backgroundColor
+	}
 
 	// Determine output format based on firmware version (epdgz requires >= 2.6.1)
 	firmwareVersion := c.Request().Header.Get("X-Firmware-Version")
@@ -384,15 +467,7 @@ func (h *ImageHandler) ServeImage(c echo.Context) error {
 		procOptions["format"] = "png"
 	}
 
-	// 3.5. Parse X-Processing-Settings header if present
-	var settings *photoframe.ProcessingSettings
-	if settingsStr := c.Request().Header.Get("X-Processing-Settings"); settingsStr != "" {
-		settings = &photoframe.ProcessingSettings{}
-		if err := json.Unmarshal([]byte(settingsStr), settings); err != nil {
-			fmt.Printf("Failed to parse X-Processing-Settings header: %v\n", err)
-			settings = nil
-		}
-	}
+	// (X-Processing-Settings was parsed above, before the layout decision)
 
 	// 3.6. Parse X-Color-Palette header if present
 	var palette *photoframe.Palette
@@ -404,7 +479,12 @@ func (h *ImageHandler) ServeImage(c echo.Context) error {
 		}
 	}
 
-	headerOpts := h.processor.MapProcessingSettings(settings, palette)
+	// GC16 grayscale mode: prefer the device-reported display type, falling back
+	// to the board name for firmware that predates the display_type field.
+	// Only treat as grayscale when the device is known.
+	grayscale := deviceFound && device.IsGrayscale()
+
+	headerOpts := h.processor.MapProcessingSettings(settings, palette, grayscale)
 	for k, v := range headerOpts {
 		procOptions[k] = v
 	}
@@ -413,7 +493,7 @@ func (h *ImageHandler) ServeImage(c echo.Context) error {
 	processedBytes, thumbBytes, err := h.processor.ProcessImage(imgWithOverlay, procOptions)
 	if err != nil {
 		fmt.Printf("Processor failed: %v\n", err)
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "processor service failed: " + err.Error()})
+		return respondError(c, http.StatusInternalServerError, "processor service failed: "+err.Error())
 	}
 
 	// 4. Cache Thumbnail & Set Headers
@@ -422,7 +502,7 @@ func (h *ImageHandler) ServeImage(c echo.Context) error {
 		thumbPath := filepath.Join(h.dataDir, fmt.Sprintf("thumb_%s.jpg", thumbID))
 
 		if err := os.WriteFile(thumbPath, thumbBytes, 0644); err == nil {
-			thumbnailUrl := fmt.Sprintf("http://%s/served-image-thumbnail/%s", c.Request().Host, thumbID)
+			thumbnailUrl := fmt.Sprintf("%s/served-image-thumbnail/%s", h.deviceBaseURL(c), thumbID)
 			c.Response().Header().Set("X-Thumbnail-URL", thumbnailUrl)
 		} else {
 			fmt.Printf("Failed to save served thumbnail: %v\n", err)
@@ -430,7 +510,7 @@ func (h *ImageHandler) ServeImage(c echo.Context) error {
 	}
 
 	// 5. Config Sync: push config payload if server has newer config
-	applyConfigSyncHeader(c, &device, deviceFound)
+	h.applyConfigSync(c, &device, deviceFound)
 
 	// Set Content-Length header
 	c.Response().Header().Set("Content-Length", fmt.Sprintf("%d", len(processedBytes)))
@@ -447,31 +527,9 @@ func (h *ImageHandler) ServeImage(c echo.Context) error {
 // config if it's newer.
 // POST /api/device-config/sync
 func (h *ImageHandler) SyncDeviceConfig(c echo.Context) error {
-	// Identify device using same logic as ServeImage
-	var device model.Device
-	deviceFound := false
-
-	if devID, ok := c.Get("device_id").(uint); ok && devID > 0 {
-		if err := h.db.First(&device, devID).Error; err == nil {
-			deviceFound = true
-		}
-	}
+	device, deviceFound := h.identifyDevice(c)
 	if !deviceFound {
-		if hostname := c.Request().Header.Get("X-Hostname"); hostname != "" {
-			if err := h.db.Where("host = ?", hostname).First(&device).Error; err == nil {
-				deviceFound = true
-			}
-		}
-	}
-	if !deviceFound {
-		clientIP := c.RealIP()
-		if err := h.db.Where("host = ?", clientIP).First(&device).Error; err == nil {
-			deviceFound = true
-		}
-	}
-
-	if !deviceFound {
-		return c.JSON(http.StatusNotFound, map[string]string{"error": "device not found"})
+		return respondError(c, http.StatusNotFound, "device not found")
 	}
 
 	// Parse request body: { "config": {...}, "processing_settings": {...}, "color_palette": {...}, "config_last_updated": 123 }
@@ -482,7 +540,7 @@ func (h *ImageHandler) SyncDeviceConfig(c echo.Context) error {
 		ConfigLastUpdated  int64           `json:"config_last_updated"`
 	}
 	if err := c.Bind(&req); err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid request"})
+		return respondError(c, http.StatusBadRequest, "invalid request")
 	}
 
 	// Store device's config in database
@@ -520,7 +578,7 @@ func (h *ImageHandler) UpdateDeviceConfig(c echo.Context) error {
 
 	var device model.Device
 	if err := h.db.First(&device, uint(id)).Error; err != nil {
-		return c.JSON(http.StatusNotFound, map[string]string{"error": "device not found"})
+		return respondError(c, http.StatusNotFound, "device not found")
 	}
 
 	var req struct {
@@ -529,7 +587,22 @@ func (h *ImageHandler) UpdateDeviceConfig(c echo.Context) error {
 		ColorPalette       json.RawMessage `json:"color_palette"`
 	}
 	if err := c.Bind(&req); err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid request"})
+		return respondError(c, http.StatusBadRequest, "invalid request")
+	}
+
+	var configMap map[string]interface{}
+	if len(req.Config) > 0 {
+		json.Unmarshal(req.Config, &configMap)
+	}
+	// The frame password changes only through POST
+	// /devices/:id/frame-password, which keeps the stored one in step. Here
+	// the direct push below would change it on the frame behind the server's
+	// back and lock the server out. Refused rather than dropped, before
+	// anything is stored: a silently emptied edit would still advance the
+	// sync timestamp.
+	if _, ok := configMap["http_password"]; ok {
+		return respondError(c, http.StatusBadRequest,
+			"http_password cannot be set through the device config; use POST /api/devices/:id/frame-password")
 	}
 
 	updates := map[string]interface{}{
@@ -548,12 +621,13 @@ func (h *ImageHandler) UpdateDeviceConfig(c echo.Context) error {
 	h.db.Model(&device).Updates(updates)
 
 	// If image_url points to this server, ensure a device token is included
-	var configMap map[string]interface{}
-	if len(req.Config) > 0 {
-		json.Unmarshal(req.Config, &configMap)
-	}
 	if configMap != nil {
-		if imageURL, ok := configMap["image_url"].(string); ok && strings.Contains(imageURL, "/image/") {
+		// Matches the unified bare "/image", the legacy "/image/<source>",
+		// and any "/image?..." query form.
+		if imageURL, ok := configMap["image_url"].(string); ok &&
+			(strings.Contains(imageURL, "/image/") ||
+				strings.HasSuffix(imageURL, "/image") ||
+				strings.Contains(imageURL, "/image?")) {
 			// Generate or reuse a device token
 			if userID, ok := c.Get("user_id").(uint); ok {
 				username, _ := c.Get("username").(string)
@@ -569,13 +643,16 @@ func (h *ImageHandler) UpdateDeviceConfig(c echo.Context) error {
 		}
 	}
 
-	// Attempt to push config to device directly
+	// Attempt to push directly to the device. Processing settings go FIRST:
+	// the config push advances the device's sync timestamp, and a partial
+	// failure after it would leave the settings undeliverable (the device
+	// would report itself current on its next fetch and applyConfigSync
+	// would skip the payload). When the processing push fails, the config
+	// push is skipped too so the whole edit stays eligible for the deferred
+	// sync path.
 	pushResult := "synced"
 	if device.Host != "" && configMap != nil {
-		if err := photoframe.NewClient(device.Host).PushConfig(configMap); err != nil {
-			log.Printf("Could not push config to device %s: %v (will sync on next image fetch)", device.Host, err)
-			pushResult = "offline"
-		}
+		pushResult = h.pushDeviceConfig(device, req.ProcessingSettings, configMap)
 	}
 
 	return c.JSON(http.StatusOK, map[string]interface{}{
@@ -585,6 +662,44 @@ func (h *ImageHandler) UpdateDeviceConfig(c echo.Context) error {
 	})
 }
 
+// pushDeviceConfig pushes an edit straight to the device and reports
+// "synced", "offline" when it has to wait for the next image fetch, or
+// "auth_required" when the frame refused the stored password: the edit still
+// reaches the frame with its next image fetch (that channel is the frame's
+// own, not password-gated), but the webapp should ask for the password.
+func (h *ImageHandler) pushDeviceConfig(device model.Device, processingSettings json.RawMessage, configMap map[string]interface{}) string {
+	// Holds the stored password in place until the push is done, so a
+	// concurrent frame password change cannot slip in between.
+	// At the host loaded with the edit: if it was changed meanwhile, the
+	// deferred sync delivers the edit to whichever frame is this device.
+	client, release, err := service.FrameClientAt(h.db, device.ID, device.Host)
+	if err != nil {
+		log.Printf("Could not push config to device %d: %v (will sync on next image fetch)", device.ID, err)
+		return "offline"
+	}
+	defer release()
+	if len(processingSettings) > 0 {
+		if err := client.PushProcessingSettings(processingSettings); err != nil {
+			log.Printf("Could not push processing settings to device %s: %v (will sync on next image fetch)", device.Host, err)
+			return configPushFailure(err)
+		}
+	}
+	if err := client.PushConfig(configMap); err != nil {
+		log.Printf("Could not push config to device %s: %v (will sync on next image fetch)", device.Host, err)
+		return configPushFailure(err)
+	}
+	return "synced"
+}
+
+// configPushFailure is the push_result for a failed direct push.
+func configPushFailure(err error) string {
+	var se *photoframe.StatusError
+	if errors.As(err, &se) && se.StatusCode == http.StatusUnauthorized {
+		return "auth_required"
+	}
+	return "offline"
+}
+
 // GetDeviceConfig returns the server-side device config.
 // GET /api/devices/:id/config
 func (h *ImageHandler) GetDeviceConfig(c echo.Context) error {
@@ -592,7 +707,7 @@ func (h *ImageHandler) GetDeviceConfig(c echo.Context) error {
 
 	var device model.Device
 	if err := h.db.First(&device, uint(id)).Error; err != nil {
-		return c.JSON(http.StatusNotFound, map[string]string{"error": "device not found"})
+		return respondError(c, http.StatusNotFound, "device not found")
 	}
 
 	resp := map[string]interface{}{
@@ -642,16 +757,16 @@ func (h *ImageHandler) GetServedImageThumbnail(c echo.Context) error {
 	id := c.Param("id")
 	// Prevent directory traversal
 	if id == "" || id == "." || id == ".." {
-		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid id"})
+		return respondError(c, http.StatusBadRequest, "invalid id")
 	}
 
 	thumbPath := filepath.Join(h.dataDir, fmt.Sprintf("thumb_%s.jpg", id))
 	data, err := os.ReadFile(thumbPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return c.JSON(http.StatusNotFound, map[string]string{"error": "thumbnail not found"})
+			return respondError(c, http.StatusNotFound, "thumbnail not found")
 		}
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to read thumbnail"})
+		return respondError(c, http.StatusInternalServerError, "failed to read thumbnail")
 	}
 
 	// Delete after 5 minutes instead of immediately
@@ -666,21 +781,42 @@ func (h *ImageHandler) GetServedImageThumbnail(c echo.Context) error {
 	return c.Blob(http.StatusOK, "image/jpeg", data)
 }
 
+// postRotateWaitSec is how long we ask a device to stay awake after rotating so
+// we can pull its config. The firmware clamps this to its own maximum.
+const postRotateWaitSec = 20
 
-// applyConfigSyncHeader sets the X-Config-Payload response header when the
-// server's stored device config is newer than what the device most recently
-// reported. Pulled out so both the bypass branch and the main flow share it.
-func applyConfigSyncHeader(c echo.Context, device *model.Device, deviceFound bool) {
-	if !deviceFound || device.ConfigLastUpdated <= 0 {
+// applyConfigSync reconciles config between server and device on each image
+// fetch, using the device's reported X-Config-Last-Updated timestamp:
+//   - server newer → push our config down via X-Config-Payload (device applies it)
+//   - device newer → ask the device to stay up (X-Post-Rotate-Wait-Sec) and pull
+//     its config in the background, catching the server up to on-device edits
+//
+// Shared by the bypass branch and the main flow.
+func (h *ImageHandler) applyConfigSync(c echo.Context, device *model.Device, deviceFound bool) {
+	if !deviceFound {
 		return
 	}
+
 	deviceConfigTS := int64(0)
 	if tsStr := c.Request().Header.Get("X-Config-Last-Updated"); tsStr != "" {
 		if ts, err := strconv.ParseInt(tsStr, 10, 64); err == nil {
 			deviceConfigTS = ts
 		}
 	}
-	if device.ConfigLastUpdated <= deviceConfigTS {
+
+	// Device has edits we haven't captured: ask it to stay up and pull them.
+	if deviceConfigTS > device.ConfigLastUpdated {
+		if device.Host == "" {
+			return // remote device we can't reach back to
+		}
+		c.Response().Header().Set("X-Post-Rotate-Wait-Sec", strconv.Itoa(postRotateWaitSec))
+		h.pullDeviceConfigAsync(*device, deviceConfigTS)
+		return
+	}
+
+	// Server has newer config: push it down. (Nothing to push if we've never
+	// recorded a server-side edit, or the device is already current.)
+	if device.ConfigLastUpdated <= 0 || device.ConfigLastUpdated <= deviceConfigTS {
 		return
 	}
 	payload := buildConfigPayload(device)
@@ -690,6 +826,69 @@ func applyConfigSyncHeader(c echo.Context, device *model.Device, deviceFound boo
 	c.Response().Header().Set("X-Config-Payload", payload)
 	log.Printf("Config sync: pushing config to device (server=%d, device=%d)",
 		device.ConfigLastUpdated, deviceConfigTS)
+}
+
+// pullDeviceConfigAsync fetches the device's current config in the background and
+// stores it, catching the server up when config was changed on the device. The
+// device keeps its HTTP server up for postRotateWaitSec after rotating (it saw
+// X-Post-Rotate-Wait-Sec), so we retry within that window until it answers.
+func (h *ImageHandler) pullDeviceConfigAsync(device model.Device, deviceTS int64) {
+	if device.Host == "" {
+		return
+	}
+	go func() {
+		deadline := time.Now().Add(postRotateWaitSec * time.Second)
+		for {
+			// A client per attempt, with the password stored at that moment:
+			// the frame's password may be changed while this loop waits. The
+			// host stays the one that asked, whose timestamp this pull is for.
+			client, release, cerr := service.FrameClientAt(h.db, device.ID, device.Host)
+			if cerr != nil {
+				log.Printf("Config sync: not pulling config for device %d: %v", device.ID, cerr)
+				return
+			}
+			configRaw, err := client.FetchConfig()
+			if err == nil {
+				updates := map[string]interface{}{
+					"device_config":       configRaw,
+					"config_last_updated": deviceTS,
+				}
+				if proc, perr := client.FetchProcessingSettings(); perr == nil {
+					updates["device_processing_settings"] = proc
+				}
+				if palette, perr := client.FetchPalette(); perr == nil {
+					updates["device_color_palette"] = palette
+				}
+				release()
+				var parsed struct {
+					DisplayOrientation string `json:"display_orientation"`
+				}
+				if json.Unmarshal([]byte(configRaw), &parsed) == nil && parsed.DisplayOrientation != "" {
+					updates["orientation"] = parsed.DisplayOrientation
+				}
+				if uerr := h.db.Model(&model.Device{}).Where("id = ?", device.ID).Updates(updates).Error; uerr != nil {
+					log.Printf("Config sync: failed to store pulled config for device %d: %v", device.ID, uerr)
+				} else {
+					log.Printf("Config sync: pulled newer config from device %s (ts=%d)", device.Host, deviceTS)
+				}
+				return
+			}
+			release()
+			// A rejected password stays rejected, and every retry would spend
+			// another of the frame's free wrong guesses.
+			if service.IsFrameAuthError(err) {
+				log.Printf("Config sync: device %s refused the stored password, not pulling its config: %v",
+					device.Host, err)
+				return
+			}
+			if time.Now().After(deadline) {
+				log.Printf("Config sync: could not reach device %s to pull config within %ds",
+					device.Host, postRotateWaitSec)
+				return
+			}
+			time.Sleep(2 * time.Second)
+		}
+	}()
 }
 
 // rotate90CW returns src rotated 90° clockwise. Used for bypass sources to

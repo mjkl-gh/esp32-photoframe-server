@@ -1,9 +1,12 @@
 package main
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/aitjcize/esp32-photoframe-server/backend/internal/db"
 	"github.com/aitjcize/esp32-photoframe-server/backend/internal/handler"
@@ -129,25 +132,16 @@ func main() {
 	backfillDeviceTokens(database)
 
 	// Initialize Services
+	service.SetThumbnailDir(filepath.Join(dataDir, "thumbnails"))
 	settingsService := service.NewSettingsService(database)
 	tokenStore := service.NewDBTokenStore(database, "photos")
-	// JWT Secret - In production, this should come from env but for Addon we might generate or fix it
-	jwtSecret := os.Getenv("JWT_SECRET")
-	authService := service.NewAuthService(database, jwtSecret)
+	// Resolve the JWT secret: env → persisted setting → freshly generated.
+	// A fresh install is secure with no configuration instead of falling back
+	// to a hard-coded default.
+	jwtSecret, jwtFromEnv := resolveJWTSecret(settingsService)
+	authService := service.NewAuthService(database, jwtSecret, !jwtFromEnv)
 
-	// Migrate All Models
-	// Device and other models are handled by golang-migrate now
-	/*
-		if err := database.AutoMigrate(
-			&model.User{},
-			&model.APIKey{},
-			&model.Setting{},
-			&model.Image{},
-			&model.GoogleAuth{},
-		); err != nil {
-			log.Fatal("Failed to migrate database:", err)
-		}
-	*/
+	// Schema is owned by golang-migrate (db/migrations); no AutoMigrate here.
 
 	// Initialize Google Photos Client
 	// Pass settingsService as ConfigProvider so it fetches latest config on every request
@@ -174,6 +168,11 @@ func main() {
 	// Initialize Immich Service
 	immichService := service.NewImmichService(database, settingsService)
 	immichService.StartAutoSync()
+	// Initialize search-topic sources (each user topic becomes a synced album).
+	unsplashService := service.NewUnsplashService(database, settingsService)
+	unsplashService.StartAutoSync()
+	pexelsService := service.NewPexelsService(database, settingsService)
+	pexelsService.StartAutoSync()
 	// Initialize AI Generation Service
 	aiGenerationService := service.NewAIGenerationService(settingsService)
 	// Initialize Generative (procedural) Service — fractal / DLA / …
@@ -188,6 +187,8 @@ func main() {
 	sourceRegistry.Register(service.NewImmichSource(database, immichService))
 	sourceRegistry.Register(service.NewGooglePhotosSource(database, dataDir))
 	sourceRegistry.Register(service.NewSynologyPhotosSource(database, synologyService))
+	sourceRegistry.Register(service.NewTopicSourcePlugin(database, model.SourceUnsplash))
+	sourceRegistry.Register(service.NewTopicSourcePlugin(database, model.SourcePexels))
 	sourceRegistry.Register(service.NewURLProxySource(database))
 	sourceRegistry.Register(service.NewAIGenerationSource(aiGenerationService))
 	sourceRegistry.Register(service.NewFractalSource(generativeService))
@@ -233,6 +234,14 @@ func main() {
 	googleHandler := handler.NewGoogleHandler(googleClient, googleCalendarClient, pickerService, database, dataDir)
 	sh := handler.NewSynologyHandler(synologyService)
 	imh := handler.NewImmichHandler(immichService)
+	// Generic photo-sync endpoints (sync / sync-status / clear / count) shared
+	// across sources.
+	synologySync := handler.NewPhotoSyncHandler(synologyService)
+	immichSync := handler.NewPhotoSyncHandler(immichService)
+	unsplashSync := handler.NewPhotoSyncHandler(unsplashService)
+	unsplashTopics := handler.NewTopicSourceHandler(unsplashService)
+	pexelsSync := handler.NewPhotoSyncHandler(pexelsService)
+	pexelsTopics := handler.NewTopicSourceHandler(pexelsService)
 	gh := handler.NewGalleryHandler(database, synologyService, immichService, dataDir)
 	ih := handler.NewImageHandler(handler.ImageHandlerDeps{
 		Settings:       settingsService,
@@ -247,13 +256,18 @@ func main() {
 		DataDir:        dataDir,
 	})
 	ch := handler.NewCalendarHandler(googleCalendarClient, calendarClient)
-	ah := handler.NewAuthHandler(authService)
+	ah := handler.NewAuthHandler(authService, settingsService)
 
 	// Echo instance
 	e := echo.New()
 
-	// Middleware
-	e.Use(echoMiddleware.Logger())
+	// Middleware. Log ${path} (not ${uri}) so secrets in query strings — e.g.
+	// the device ?token= — never end up in access logs.
+	e.Use(echoMiddleware.LoggerWithConfig(echoMiddleware.LoggerConfig{
+		Format: `{"time":"${time_rfc3339_nano}","remote_ip":"${remote_ip}",` +
+			`"method":"${method}","path":"${path}","status":${status},` +
+			`"error":"${error}","latency_human":"${latency_human}"}` + "\n",
+	}))
 	e.Use(echoMiddleware.Recover())
 	e.Use(echoMiddleware.CORSWithConfig(echoMiddleware.CORSConfig{
 		AllowOrigins: []string{"http://localhost:5173", "http://homeassistant.local:8123"},
@@ -280,6 +294,8 @@ func main() {
 
 	// Image Route (Protected)
 	e.GET("/image/:source", ih.ServeImage, authMiddleware)
+	// Unified endpoint: source resolved server-side from the device.
+	e.GET("/image", ih.ServeImage, authMiddleware)
 
 	// Thumbnail likely needs protection too, or obscure IDs. For now, keep public as they are temporary?
 	// User said "access the /image/<source>/ endpoint. This one... people can't just access".
@@ -300,11 +316,18 @@ func main() {
 	protectedApi.GET("/devices", deviceHandler.ListDevices)
 	protectedApi.POST("/devices", deviceHandler.AddDevice)
 	protectedApi.PUT("/devices/:id", deviceHandler.UpdateDevice)
+	protectedApi.PUT("/devices/:id/http-password", deviceHandler.SetHTTPPassword)
+	protectedApi.POST("/devices/:id/frame-password", deviceHandler.ChangeFramePassword)
 	protectedApi.DELETE("/devices/:id", deviceHandler.DeleteDevice)
 	protectedApi.POST("/devices/:id/push", deviceHandler.PushToDevice)
 	protectedApi.POST("/devices/:id/refresh", deviceHandler.RefreshDevice)
 	protectedApi.GET("/devices/:id/config", ih.GetDeviceConfig)
 	protectedApi.PUT("/devices/:id/config", ih.UpdateDeviceConfig)
+	protectedApi.GET("/devices/:id/albums", deviceHandler.GetDeviceAlbums)
+	protectedApi.PUT("/devices/:id/albums", deviceHandler.UpdateDeviceAlbums)
+
+	// Source albums (persisted), shared by device picker + gallery
+	protectedApi.GET("/albums", deviceHandler.ListAlbums)
 
 	// Device Tokens (Protected)
 	protectedApi.POST("/auth/tokens", ah.GenerateDeviceToken)
@@ -314,6 +337,7 @@ func main() {
 	protectedApi.GET("/auth/sessions", ah.ListSessions)
 	protectedApi.DELETE("/auth/sessions/:id", ah.RevokeSession)
 	protectedApi.POST("/auth/account", ah.UpdateAccount)
+	protectedApi.POST("/auth/rotate-secret", ah.RotateJWTSecret)
 
 	// Gallery (Protected) - Unified
 	protectedApi.GET("/gallery/photos", gh.ListPhotos)
@@ -335,18 +359,37 @@ func main() {
 
 	// Synology (Protected)
 	protectedApi.POST("/synology/test", sh.TestConnection)
-	protectedApi.POST("/synology/sync", sh.Sync)
-	protectedApi.POST("/synology/clear", sh.Clear)
+	protectedApi.POST("/synology/sync", synologySync.Sync)
+	protectedApi.GET("/synology/sync-status", synologySync.SyncStatus)
+	protectedApi.POST("/synology/clear", synologySync.Clear)
 	protectedApi.GET("/synology/albums", sh.ListAlbums)
-	protectedApi.GET("/synology/count", sh.GetPhotoCount)
+	protectedApi.POST("/synology/sync-albums", sh.SetSyncAlbums)
+	protectedApi.GET("/synology/count", synologySync.Count)
 	protectedApi.POST("/synology/logout", sh.Logout)
 
 	// Immich (Protected)
 	protectedApi.POST("/immich/test", imh.TestConnection)
-	protectedApi.POST("/immich/sync", imh.Sync)
-	protectedApi.POST("/immich/clear", imh.Clear)
+	protectedApi.POST("/immich/sync", immichSync.Sync)
+	protectedApi.GET("/immich/sync-status", immichSync.SyncStatus)
+	protectedApi.POST("/immich/clear", immichSync.Clear)
 	protectedApi.GET("/immich/albums", imh.ListAlbums)
-	protectedApi.GET("/immich/count", imh.GetPhotoCount)
+	protectedApi.POST("/immich/sync-albums", imh.SetSyncAlbums)
+	protectedApi.GET("/immich/count", immichSync.Count)
+
+	// Search-topic sources (Unsplash / Pexels). Topics are listed via
+	// the generic GET /albums?source=<src>; sync/count/clear reuse PhotoSyncHandler.
+	protectedApi.POST("/unsplash/sync", unsplashSync.Sync)
+	protectedApi.GET("/unsplash/sync-status", unsplashSync.SyncStatus)
+	protectedApi.POST("/unsplash/clear", unsplashSync.Clear)
+	protectedApi.GET("/unsplash/count", unsplashSync.Count)
+	protectedApi.POST("/unsplash/sync-topics", unsplashTopics.SetSyncTopics)
+	protectedApi.POST("/unsplash/test", unsplashTopics.TestConnection)
+	protectedApi.POST("/pexels/sync", pexelsSync.Sync)
+	protectedApi.GET("/pexels/sync-status", pexelsSync.SyncStatus)
+	protectedApi.POST("/pexels/clear", pexelsSync.Clear)
+	protectedApi.GET("/pexels/count", pexelsSync.Count)
+	protectedApi.POST("/pexels/sync-topics", pexelsTopics.SetSyncTopics)
+	protectedApi.POST("/pexels/test", pexelsTopics.TestConnection)
 
 	// Calendar (Protected)
 	protectedApi.GET("/calendar/calendars", ch.ListCalendars)
@@ -367,19 +410,40 @@ func main() {
 	}
 
 	// 1. Serve specific assets folder
-	// This handles /assets/index-....js|css correctly with proper MIME types
-	e.Static("/assets", filepath.Join(staticDir, "assets"))
+	// This handles /assets/index-....js|css correctly with proper MIME
+	// types. The filenames carry content hashes, so they are immutable and
+	// may be cached forever.
+	assets := e.Group("/assets", func(next echo.HandlerFunc) echo.HandlerFunc {
+		return func(c echo.Context) error {
+			// Only successful responses are immutable -- a cached 404 would
+			// wedge the bundle for a year if the asset ever reappears
+			c.Response().Before(func() {
+				if c.Response().Status < 400 {
+					c.Response().Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+				}
+			})
+			return next(c)
+		}
+	})
+	assets.Static("/", filepath.Join(staticDir, "assets"))
+
+	// index.html references the hashed assets, so it must be revalidated on
+	// every load: without an explicit no-cache, browsers heuristically cache
+	// it (10% of time since Last-Modified) and keep loading the previous
+	// deploy's bundle.
+	serveIndex := func(c echo.Context) error {
+		c.Response().Header().Set("Cache-Control", "no-cache")
+		return c.File(filepath.Join(staticDir, "index.html"))
+	}
 
 	// 2. Serve root index.html
-	e.File("/", filepath.Join(staticDir, "index.html"))
+	e.GET("/", serveIndex)
 
 	// 3. Serve favicon from the root of the static dir
 	e.File("/favicon.svg", filepath.Join(staticDir, "favicon.svg"))
 
 	// 4. SPA Fallback: Any other route not matched (api is already handled) goes to index.html
-	e.GET("/*", func(c echo.Context) error {
-		return c.File(filepath.Join(staticDir, "index.html"))
-	})
+	e.GET("/*", serveIndex)
 
 	// Start server
 	listenPort := os.Getenv("PORT")
@@ -409,6 +473,30 @@ func cleanupTempThumbnails(dataDir string) {
 // the token name to device names. This is idempotent and handles the migration
 // from tokens without device_id to tokens with device_id.
 // Ambiguous matches (multiple devices with the same name) are skipped.
+// resolveJWTSecret returns the JWT signing secret and whether it came from the
+// JWT_SECRET env var. Resolution order: env var → persisted setting → a freshly
+// generated random secret (persisted). A fresh install is therefore secure with
+// no configuration instead of falling back to a hard-coded default.
+func resolveJWTSecret(settings *service.SettingsService) (string, bool) {
+	if env := strings.TrimSpace(os.Getenv("JWT_SECRET")); env != "" {
+		return env, true
+	}
+	if v, err := settings.Get("jwt_secret"); err == nil && v != "" {
+		return v, false
+	}
+	buf := make([]byte, 32)
+	if _, err := rand.Read(buf); err != nil {
+		log.Fatalf("Failed to generate JWT secret: %v", err)
+	}
+	secret := hex.EncodeToString(buf)
+	if err := settings.Set("jwt_secret", secret); err != nil {
+		log.Printf("WARNING: failed to persist generated JWT secret (will regenerate next boot): %v", err)
+	} else {
+		log.Println("auth: generated and persisted a new random JWT secret")
+	}
+	return secret, false
+}
+
 func backfillDeviceTokens(database *gorm.DB) {
 	var keys []model.APIKey
 	database.Where("device_id IS NULL").Find(&keys)

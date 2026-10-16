@@ -7,8 +7,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -33,7 +31,8 @@ func NewImmichService(db *gorm.DB, settings *SettingsService) *ImmichService {
 		IsRelevantKey: func(key string) bool {
 			switch key {
 			case "immich_auto_sync_enabled", "immich_auto_sync_interval_minutes",
-				"immich_source_mode", "immich_album_id", "immich_url", "immich_api_key":
+				"immich_source_mode", "immich_memory_mode", "immich_album_id",
+				"immich_url", "immich_api_key":
 				return true
 			default:
 				return false
@@ -41,7 +40,7 @@ func NewImmichService(db *gorm.DB, settings *SettingsService) *ImmichService {
 		},
 		IsConfigured: svc.isAutoSyncConfigured,
 		GetConfig:    svc.getAutoSyncConfig,
-		RunSync:      svc.clearAndResyncInternal,
+		RunSync:      svc.resyncInternal,
 	})
 	return svc
 }
@@ -60,6 +59,12 @@ const (
 	ImmichModeMemories  = "memories"  // on-this-day across years
 )
 
+// Immich memory modes — how the "memories" source picks lanes. See issue #32.
+const (
+	ImmichMemoryModeAll    = "all"    // flatten all "on this day" lanes across years (default)
+	ImmichMemoryModeLatest = "latest" // only the most recent year's lane
+)
+
 // immichSourceMode returns the configured sync mode, defaulting to album.
 func (s *ImmichService) immichSourceMode() string {
 	mode, _ := s.settings.Get("immich_source_mode")
@@ -71,11 +76,30 @@ func (s *ImmichService) immichSourceMode() string {
 	}
 }
 
+// immichMemoryMode returns the configured memories lane selection, defaulting
+// to all (every year flattened into one pool).
+func (s *ImmichService) immichMemoryMode() string {
+	if mode, _ := s.settings.Get("immich_memory_mode"); mode == ImmichMemoryModeLatest {
+		return ImmichMemoryModeLatest
+	}
+	return ImmichMemoryModeAll
+}
+
 func (s *ImmichService) isAutoSyncConfigured() bool {
 	baseURL, _ := s.settings.Get("immich_url")
 	apiKey, _ := s.settings.Get("immich_api_key")
 	if baseURL == "" || apiKey == "" {
 		return false
+	}
+	// The multi-album picker owns the selection once it has written any row
+	// (a real album, or one of the virtual all/favorites/memories toggles).
+	// It never touches immich_source_mode/immich_album_id, so consulting
+	// those first left every picker-only setup looking unconfigured and
+	// silently skipped auto-sync -- issue #54. The legacy pair below still
+	// speaks for installs that predate the picker, which is exactly the
+	// "no album rows yet" case ensureGlobalAlbumSeed migrates from.
+	if total, enabled := countAlbums(s.db, model.SourceImmich); total > 0 {
+		return enabled > 0
 	}
 	// Album mode is the only one that needs an album picked.
 	if s.immichSourceMode() == ImmichModeAlbum {
@@ -86,17 +110,8 @@ func (s *ImmichService) isAutoSyncConfigured() bool {
 }
 
 func (s *ImmichService) getAutoSyncConfig() (bool, time.Duration) {
-	enabledStr, _ := s.settings.Get("immich_auto_sync_enabled")
-	enabled := strings.EqualFold(enabledStr, "true")
-
-	minutes := 60
-	if intervalStr, err := s.settings.Get("immich_auto_sync_interval_minutes"); err == nil {
-		if parsed, parseErr := strconv.Atoi(intervalStr); parseErr == nil && parsed > 0 {
-			minutes = parsed
-		}
-	}
-
-	return enabled, time.Duration(minutes) * time.Minute
+	return parseAutoSyncConfig(s.settings,
+		"immich_auto_sync_enabled", "immich_auto_sync_interval_minutes")
 }
 
 // getClient returns the current client, initializing from stored settings if needed.
@@ -139,113 +154,264 @@ func (s *ImmichService) ListAlbums() ([]immich.Album, error) {
 	return client.ListAlbums()
 }
 
-// ImportPhotos fetches image assets according to the configured source
-// mode (album / all / favorites / memories) and adds them to the DB.
+// SetSyncAlbums defines the set of Immich albums to sync: the given real album
+// external IDs plus the enabled virtual modes (favorites/all/memories). Albums
+// in the set are upserted with sync_enabled=true; all other Immich album rows
+// are disabled. A full clear+resync then rebuilds the local pool + memberships.
+func (s *ImmichService) SetSyncAlbums(realIDs []string, favorites, all, memories bool) error {
+	// Resolve names for real albums (best-effort).
+	nameByID := map[string]string{}
+	if list, err := s.ListAlbums(); err == nil {
+		for _, a := range list {
+			nameByID[a.ID] = a.AlbumName
+		}
+	}
+
+	desired := map[string]model.Album{}
+	for _, id := range realIDs {
+		if id == "" {
+			continue
+		}
+		name := nameByID[id]
+		if name == "" {
+			name = id
+		}
+		desired[id] = model.Album{
+			Source: model.SourceImmich, ExternalID: id,
+			Kind: model.AlbumKindReal, Name: name, SyncEnabled: true,
+		}
+	}
+	addVirtual := func(on bool, ext, name string) {
+		if on {
+			desired[ext] = model.Album{
+				Source: model.SourceImmich, ExternalID: ext,
+				Kind: model.AlbumKindVirtual, Name: name, SyncEnabled: true,
+			}
+		}
+	}
+	addVirtual(all, model.ImmichVirtualAll, "All Photos")
+	addVirtual(favorites, model.ImmichVirtualFavorites, "Favorites")
+	addVirtual(memories, model.ImmichVirtualMemories, "Memories")
+
+	// Upsert desired albums (enabled); disable everything else.
+	for ext, a := range desired {
+		var existing model.Album
+		if err := s.db.Where("source = ? AND external_id = ?", model.SourceImmich, ext).
+			First(&existing).Error; err != nil {
+			a.UpdatedAt = time.Now()
+			if err := s.db.Create(&a).Error; err != nil {
+				log.Printf("[immich] create album (external_id=%s, name=%q): %v", ext, a.Name, err)
+			}
+		} else {
+			if err := s.db.Model(&model.Album{}).Where("id = ?", existing.ID).Updates(map[string]interface{}{
+				"sync_enabled": true, "name": a.Name, "kind": a.Kind,
+			}).Error; err != nil {
+				log.Printf("[immich] update album %d (external_id=%s): %v", existing.ID, ext, err)
+			}
+		}
+	}
+	var rows []model.Album
+	s.db.Where("source = ?", model.SourceImmich).Find(&rows)
+	for _, a := range rows {
+		if _, ok := desired[a.ExternalID]; !ok && a.SyncEnabled {
+			if err := s.db.Model(&model.Album{}).Where("id = ?", a.ID).Update("sync_enabled", false).Error; err != nil {
+				log.Printf("[immich] disable album %d (external_id=%s): %v", a.ID, a.ExternalID, err)
+			}
+		}
+	}
+
+	// Drop the deselected albums' images right away (covers virtual albums
+	// too, which the shared SetSyncAlbums doesn't manage). Metadata only; a
+	// re-check plus resync re-imports them.
+	pruneDisabledAlbumMemberships(s.db, model.SourceImmich)
+	gcOrphanImagesForSource(s.db, model.SourceImmich)
+
+	// The scheduler only re-arms on a settings change, and the picker writes
+	// album rows rather than settings -- so without this nudge a selection
+	// made while the timer sits on its 24h "not configured" delay wouldn't be
+	// picked up until the next restart (issue #54).
+	s.autoSync.TriggerReset()
+
+	// Persist the selection only — do NOT import here. The import is triggered
+	// explicitly (manual Sync) or by the auto-sync scheduler, so toggling
+	// albums doesn't kick off a clear+resync on every change.
+	return nil
+}
+
+// Source implements AlbumSource: the model.Source* constant this owns.
+func (s *ImmichService) Source() string { return model.SourceImmich }
+
+// ListRemoteAlbums implements AlbumSource: the current real albums, used for a
+// best-effort name refresh during sync.
+func (s *ImmichService) ListRemoteAlbums() ([]RemoteAlbum, error) {
+	client, err := s.getClient()
+	if err != nil {
+		return nil, err
+	}
+	list, err := client.ListAlbums()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]RemoteAlbum, 0, len(list))
+	for _, a := range list {
+		out = append(out, RemoteAlbum{ExternalID: a.ID, Name: a.AlbumName})
+	}
+	return out, nil
+}
+
+// FetchAlbumAssets implements AlbumSource: the servable IMAGE assets for one
+// album (real or virtual), mapped to source-agnostic RemoteAssets. RAW assets
+// are skipped (no preview/thumbnail API).
+func (s *ImmichService) FetchAlbumAssets(album model.Album) ([]RemoteAsset, error) {
+	client, err := s.getClient()
+	if err != nil {
+		return nil, err
+	}
+	assets, err := s.fetchAssetsForAlbum(client, album)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]RemoteAsset, 0, len(assets))
+	for _, a := range assets {
+		if !immich.IsServableImage(a) {
+			continue
+		}
+		w, h := a.ExifInfo.ExifImageWidth, a.ExifInfo.ExifImageHeight
+		photoDate := parseImmichDate(a.ExifInfo.DateTimeOriginal)
+		if photoDate == nil {
+			photoDate = parseImmichDate(a.LocalDateTime)
+		}
+		out = append(out, RemoteAsset{
+			ExternalID:   a.ID,
+			FilePath:     a.OriginalFileName,
+			Width:        w,
+			Height:       h,
+			Orientation:  determineOrientation(w, h, a.ExifInfo.Orientation),
+			PhotoTakenAt: photoDate,
+		})
+	}
+	return out, nil
+}
+
+// ImportPhotos syncs every sync-enabled Immich album into the local DB via the
+// shared album-sync engine: one images row per asset (deduped by external_id)
+// plus an image_album_memberships row per (asset, album). Stale memberships and
+// orphaned image rows are pruned so the local pool tracks Immich.
 func (s *ImmichService) ImportPhotos() error {
 	client, err := s.getClient()
 	if err != nil {
 		return err
 	}
 
-	allAssets, err := s.fetchAssetsForMode(client)
-	if err != nil {
-		return err
-	}
+	// Materialize the legacy single-album / mode config into an albums row so
+	// existing setups keep syncing after the multi-album migration.
+	s.ensureGlobalAlbumSeed(client)
 
-	count := 0
-	for _, asset := range allAssets {
-		if asset.Type != "IMAGE" {
-			continue
-		}
-
-		// Skip RAW files — these can't be served via Immich's preview/thumbnail API
-		ext := strings.ToLower(filepath.Ext(asset.OriginalFileName))
-		switch ext {
-		case ".dng", ".cr2", ".cr3", ".nef", ".arw", ".raf", ".orf", ".rw2":
-			continue
-		}
-
-		// Deduplicate by immich_asset_id
-		var existing model.Image
-		result := s.db.Where("immich_asset_id = ? AND source = ?", asset.ID, model.SourceImmich).First(&existing)
-		if result.Error == nil {
-			continue
-		}
-
-		// Determine display orientation from EXIF dimensions and rotation
-		w, h := asset.ExifInfo.ExifImageWidth, asset.ExifInfo.ExifImageHeight
-		orientation := determineOrientation(w, h, asset.ExifInfo.Orientation)
-
-		img := model.Image{
-			ImmichAssetID: asset.ID,
-			Source:        model.SourceImmich,
-			FilePath:      asset.OriginalFileName,
-			Width:         w,
-			Height:        h,
-			Orientation:   orientation,
-			CreatedAt:     time.Now(),
-			Status:        "pending",
-		}
-
-		// Populate PhotoTakenAt from EXIF or asset metadata
-		photoDate := parseImmichDate(asset.ExifInfo.DateTimeOriginal)
-		if photoDate == nil {
-			photoDate = parseImmichDate(asset.LocalDateTime)
-		}
-		img.PhotoTakenAt = photoDate
-
-		if err := s.db.Create(&img).Error; err != nil {
-			log.Printf("Failed to insert immich asset %s: %v", asset.ID, err)
-			continue
-		}
-		count++
-	}
-
-	log.Printf("Immich ImportPhotos complete: inserted %d new photos (total assets: %d)", count, len(allAssets))
-	return nil
+	_, err = SyncAlbumSource(s.db, s)
+	return err
 }
 
-// fetchAssetsForMode dispatches to the right Immich client method for the
-// configured source mode. Returns the raw asset list — caller filters out
-// videos / RAW / duplicates and persists into the local DB.
-func (s *ImmichService) fetchAssetsForMode(client *immich.Client) ([]immich.Asset, error) {
+// fetchAssetsForAlbum returns the assets for one album — a real Immich album
+// or a virtual mode album (all / favorites / memories).
+func (s *ImmichService) fetchAssetsForAlbum(client *immich.Client, album model.Album) ([]immich.Asset, error) {
+	if album.Kind == model.AlbumKindVirtual {
+		switch album.ExternalID {
+		case model.ImmichVirtualAll:
+			return client.SearchAssets(immich.SearchMetadataRequest{})
+		case model.ImmichVirtualFavorites:
+			t := true
+			return client.SearchAssets(immich.SearchMetadataRequest{IsFavorite: &t})
+		case model.ImmichVirtualMemories:
+			return client.GetMemoryAssets(s.immichMemoryMode() == ImmichMemoryModeLatest)
+		default:
+			return nil, fmt.Errorf("unknown virtual album: %q", album.ExternalID)
+		}
+	}
+	return client.GetAlbumAssets(album.ExternalID)
+}
+
+// ensureGlobalAlbumSeed materializes the legacy global immich_source_mode /
+// immich_album_id settings into a sync-enabled albums row, once, so existing
+// installs keep working after the multi-album migration. Idempotent: skips if
+// any Immich album row already exists.
+func (s *ImmichService) ensureGlobalAlbumSeed(client *immich.Client) {
+	var count int64
+	s.db.Model(&model.Album{}).Where("source = ?", model.SourceImmich).Count(&count)
+	if count > 0 {
+		return
+	}
+
+	var ext, kind, name string
 	switch s.immichSourceMode() {
 	case ImmichModeAlbum:
-		albumID, _ := s.settings.Get("immich_album_id")
-		if albumID == "" {
-			return nil, errors.New("please select an album to sync")
+		ext, _ = s.settings.Get("immich_album_id")
+		if ext == "" {
+			return // nothing configured yet
 		}
-		return client.GetAlbumAssets(albumID)
+		kind, name = model.AlbumKindReal, ext
+		if list, e := client.ListAlbums(); e == nil {
+			for _, a := range list {
+				if a.ID == ext {
+					name = a.AlbumName
+					break
+				}
+			}
+		}
 	case ImmichModeAll:
-		return client.SearchAssets(immich.SearchMetadataRequest{})
+		ext, kind, name = model.ImmichVirtualAll, model.AlbumKindVirtual, "All Photos"
 	case ImmichModeFavorites:
-		t := true
-		return client.SearchAssets(immich.SearchMetadataRequest{IsFavorite: &t})
+		ext, kind, name = model.ImmichVirtualFavorites, model.AlbumKindVirtual, "Favorites"
 	case ImmichModeMemories:
-		return client.GetMemoryAssets()
+		ext, kind, name = model.ImmichVirtualMemories, model.AlbumKindVirtual, "Memories"
 	default:
-		return nil, fmt.Errorf("unknown immich source mode: %q", s.immichSourceMode())
+		return
+	}
+
+	album := model.Album{
+		Source:      model.SourceImmich,
+		ExternalID:  ext,
+		Kind:        kind,
+		Name:        name,
+		SyncEnabled: true,
+		UpdatedAt:   time.Now(),
+	}
+	if err := s.db.Create(&album).Error; err != nil {
+		log.Printf("Immich: failed to seed global album row: %v", err)
 	}
 }
 
 // ClearPhotos deletes all Immich photos from the database
 func (s *ImmichService) ClearPhotos() error {
-	if err := s.db.Unscoped().Where("source = ?", model.SourceImmich).Delete(&model.Image{}).Error; err != nil {
-		return err
-	}
-	log.Println("Cleared all Immich photos from database")
+	return clearSourcePhotos(s.db, model.SourceImmich)
+}
+
+// ClearAndResync runs an incremental resync from the configured albums. Despite
+// the name (kept for the PhotoSyncBackend interface), it does NOT clear first —
+// see resyncInternal.
+func (s *ImmichService) ClearAndResync() error {
+	// Run the resync in the background so the manual Sync request returns
+	// promptly; the client polls sync-status to show progress.
+	s.autoSync.SyncNowAsync()
 	return nil
 }
 
-// ClearAndResync deletes all Immich photos and re-imports from the configured album
-func (s *ImmichService) ClearAndResync() error {
-	return s.autoSync.SyncNow()
+// IsSyncing reports whether an Immich sync is currently running.
+func (s *ImmichService) IsSyncing() bool {
+	return s.autoSync.IsRunning()
 }
 
-func (s *ImmichService) clearAndResyncInternal() error {
-	if err := s.ClearPhotos(); err != nil {
-		return err
-	}
+// LastSyncError reports the most recent sync run's failure ("" on success).
+func (s *ImmichService) LastSyncError() string {
+	return s.autoSync.LastError()
+}
+
+// resyncInternal runs an incremental sync (upsert + prune) via ImportPhotos. It
+// deliberately does NOT clear first: the auto-sync scheduler fires this on every
+// startup (lastSuccessAt is in-memory and resets to zero), and a blanket delete
+// before a re-import that then fails would leave the gallery empty. Removed
+// assets are pruned by the shared album-sync engine; the explicit Clear button
+// (ClearPhotos) remains the only destructive path.
+func (s *ImmichService) resyncInternal() error {
 	return s.ImportPhotos()
 }
 
@@ -271,11 +437,7 @@ func parseImmichDate(s string) *time.Time {
 
 // GetPhotoCount returns the number of Immich photos in the database
 func (s *ImmichService) GetPhotoCount() (int64, error) {
-	var count int64
-	if err := s.db.Model(&model.Image{}).Where("source = ?", model.SourceImmich).Count(&count).Error; err != nil {
-		return 0, err
-	}
-	return count, nil
+	return sourcePhotoCount(s.db, model.SourceImmich)
 }
 
 // GetPhoto fetches the image bytes for an Immich asset by its UUID.

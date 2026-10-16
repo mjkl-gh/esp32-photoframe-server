@@ -4,6 +4,7 @@ import (
 	"net/http"
 
 	"github.com/aitjcize/esp32-photoframe-server/backend/internal/service"
+	"github.com/aitjcize/esp32-photoframe-server/backend/internal/version"
 	"github.com/aitjcize/esp32-photoframe-server/backend/pkg/googlephotos"
 	"github.com/labstack/echo/v4"
 )
@@ -19,15 +20,19 @@ func NewHandler(s *service.SettingsService, t *service.TelegramService, g *googl
 	return &Handler{settings: s, telegram: t, google: g, googleCalendar: gc}
 }
 
-// HealthCheck
+// HealthCheck reports liveness plus the build-time server version (issue #6:
+// lets users on the "latest" image tag see which version they're running).
 func (h *Handler) HealthCheck(c echo.Context) error {
-	return c.JSON(http.StatusOK, map[string]string{"status": "ok"})
+	return c.JSON(http.StatusOK, map[string]string{
+		"status":  "ok",
+		"version": version.Version,
+	})
 }
 
 func (h *Handler) GetSettings(c echo.Context) error {
 	settings, err := h.settings.GetAll()
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return respondError(c, http.StatusInternalServerError, err.Error())
 	}
 
 	if h.google.IsConnected() {
@@ -52,12 +57,12 @@ type UpdateSettingsRequest struct {
 func (h *Handler) UpdateSettings(c echo.Context) error {
 	var req UpdateSettingsRequest
 	if err := c.Bind(&req); err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]string{"error": "Invalid request"})
+		return respondError(c, http.StatusBadRequest, "Invalid request")
 	}
 
 	for k, v := range req.Settings {
 		if err := h.settings.Set(k, v); err != nil {
-			return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return respondError(c, http.StatusInternalServerError, err.Error())
 		}
 
 		// Dynamic Telegram Restart

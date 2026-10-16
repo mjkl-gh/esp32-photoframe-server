@@ -28,14 +28,14 @@ func (h *SynologyHandler) TestConnection(c echo.Context) error {
 	}
 
 	if err := h.synology.TestConnection(req.OTPCode); err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return respondError(c, http.StatusBadRequest, err.Error())
 	}
 	return c.JSON(http.StatusOK, map[string]string{"status": "ok"})
 }
 
 func (h *SynologyHandler) Logout(c echo.Context) error {
 	if err := h.synology.Logout(); err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return respondError(c, http.StatusInternalServerError, err.Error())
 	}
 	return c.JSON(http.StatusOK, map[string]string{"status": "ok"})
 }
@@ -43,36 +43,30 @@ func (h *SynologyHandler) Logout(c echo.Context) error {
 func (h *SynologyHandler) ListAlbums(c echo.Context) error {
 	albums, err := h.synology.ListAlbums()
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return respondError(c, http.StatusInternalServerError, err.Error())
 	}
 	return c.JSON(http.StatusOK, albums)
 }
 
-func (h *SynologyHandler) Sync(c echo.Context) error {
-	// Always clear and resync to ensure fresh references
-	// Synology photos aren't stored locally, just references in DB
-	if err := h.synology.ClearAndResync(); err != nil {
-		// Check if it's an authentication error
+// SetSyncAlbums defines which Synology albums (by external id) to sync.
+// POST /api/synology/sync-albums
+func (h *SynologyHandler) SetSyncAlbums(c echo.Context) error {
+	var req struct {
+		AlbumIDs []string `json:"album_ids"`
+	}
+	if err := c.Bind(&req); err != nil {
+		return respondError(c, http.StatusBadRequest, "invalid request")
+	}
+	if err := h.synology.SetSyncAlbums(req.AlbumIDs); err != nil {
 		if strings.Contains(err.Error(), "authentication expired") {
-			return c.JSON(http.StatusUnauthorized, map[string]string{"error": "Session expired. Please reconnect to Synology."})
+			return respondError(c, http.StatusUnauthorized, "Session expired. Please reconnect to Synology.")
 		}
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return respondError(c, http.StatusInternalServerError, err.Error())
 	}
-
-	return c.JSON(http.StatusOK, map[string]string{"status": "synced"})
+	return c.JSON(http.StatusOK, map[string]string{"status": "ok"})
 }
 
-func (h *SynologyHandler) Clear(c echo.Context) error {
-	if err := h.synology.ClearPhotos(); err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
-	}
-	return c.JSON(http.StatusOK, map[string]string{"status": "cleared"})
-}
-
-func (h *SynologyHandler) GetPhotoCount(c echo.Context) error {
-	count, err := h.synology.GetPhotoCount()
-	if err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
-	}
-	return c.JSON(http.StatusOK, map[string]interface{}{"count": count})
-}
+// Sync / SyncStatus / Clear / Count are served by the generic PhotoSyncHandler
+// (see photosync_handler.go). ClearAndResync now runs the import in the
+// background, so the old synchronous "authentication expired" mapping is no
+// longer reachable from the sync endpoint.

@@ -1,10 +1,12 @@
 import { defineStore } from 'pinia';
 import { api } from '../api';
+import { getApiError } from '../utils/errors';
 
 export const useImmichStore = defineStore('immich', {
   state: () => ({
     count: 0,
     albums: [] as any[],
+    syncedAlbums: [] as any[],
     loading: false,
     error: null as string | null,
   }),
@@ -13,7 +15,7 @@ export const useImmichStore = defineStore('immich', {
       try {
         const res = await api.get('/immich/count');
         this.count = res.data.count || 0;
-      } catch (e: any) {
+      } catch (e) {
         console.error('Failed to fetch Immich photo count', e);
       }
     },
@@ -24,9 +26,36 @@ export const useImmichStore = defineStore('immich', {
       try {
         const res = await api.get('/immich/albums');
         this.albums = res.data;
-      } catch (e: any) {
-        this.error = e.response?.data?.error || e.message;
+      } catch (e) {
+        this.error = getApiError(e);
         throw e;
+      } finally {
+        this.loading = false;
+      }
+    },
+
+    async fetchSyncedAlbums() {
+      try {
+        const res = await api.get('/albums?source=immich');
+        this.syncedAlbums = res.data || [];
+        return this.syncedAlbums;
+      } catch (e) {
+        console.error('Failed to fetch synced Immich albums', e);
+        throw e;
+      }
+    },
+
+    async saveSyncAlbums(payload: {
+      album_ids: string[];
+      favorites: boolean;
+      all: boolean;
+      memories: boolean;
+    }) {
+      this.loading = true;
+      try {
+        await api.post('/immich/sync-albums', payload);
+        await this.fetchSyncedAlbums();
+        await this.fetchCount();
       } finally {
         this.loading = false;
       }
@@ -38,8 +67,6 @@ export const useImmichStore = defineStore('immich', {
         const res = await api.post('/immich/test');
         await this.fetchCount();
         return res.data;
-      } catch (e: any) {
-        throw e;
       } finally {
         this.loading = false;
       }
@@ -50,8 +77,6 @@ export const useImmichStore = defineStore('immich', {
       try {
         await api.post('/immich/sync');
         await this.fetchCount();
-      } catch (e: any) {
-        throw e;
       } finally {
         this.loading = false;
       }

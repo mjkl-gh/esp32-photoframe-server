@@ -10,10 +10,23 @@ import (
 
 type AuthHandler struct {
 	authService *service.AuthService
+	settings    *service.SettingsService
 }
 
-func NewAuthHandler(authService *service.AuthService) *AuthHandler {
-	return &AuthHandler{authService: authService}
+func NewAuthHandler(authService *service.AuthService, settings *service.SettingsService) *AuthHandler {
+	return &AuthHandler{authService: authService, settings: settings}
+}
+
+// RotateJWTSecret generates a brand-new signing secret, invalidating ALL tokens
+// (the admin will be logged out and every device token must be regenerated).
+// POST /api/auth/rotate-secret
+func (h *AuthHandler) RotateJWTSecret(c echo.Context) error {
+	if err := h.authService.RotateSecret(func(secret string) error {
+		return h.settings.Set("jwt_secret", secret)
+	}); err != nil {
+		return respondError(c, http.StatusInternalServerError, err.Error())
+	}
+	return c.JSON(http.StatusOK, map[string]string{"status": "ok"})
 }
 
 type loginRequest struct {
@@ -24,12 +37,12 @@ type loginRequest struct {
 func (h *AuthHandler) Login(c echo.Context) error {
 	var req loginRequest
 	if err := c.Bind(&req); err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid request"})
+		return respondError(c, http.StatusBadRequest, "invalid request")
 	}
 
 	token, err := h.authService.Login(req.Username, req.Password, c.Request().UserAgent(), c.RealIP())
 	if err != nil {
-		return c.JSON(http.StatusUnauthorized, map[string]string{"error": err.Error()})
+		return respondError(c, http.StatusUnauthorized, err.Error())
 	}
 
 	return c.JSON(http.StatusOK, map[string]string{"token": token})
@@ -39,25 +52,25 @@ func (h *AuthHandler) Register(c echo.Context) error {
 	// Check if initialization is allowed
 	count, err := h.authService.UserCount()
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "database error"})
+		return respondError(c, http.StatusInternalServerError, "database error")
 	}
 
 	// Only allow registration if no users exist
 	if count > 0 {
-		return c.JSON(http.StatusForbidden, map[string]string{"error": "setup already completed"})
+		return respondError(c, http.StatusForbidden, "setup already completed")
 	}
 
 	var req loginRequest
 	if err := c.Bind(&req); err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid request"})
+		return respondError(c, http.StatusBadRequest, "invalid request")
 	}
 
 	if req.Username == "" || req.Password == "" {
-		return c.JSON(http.StatusBadRequest, map[string]string{"error": "username and password required"})
+		return respondError(c, http.StatusBadRequest, "username and password required")
 	}
 
 	if err := h.authService.Register(req.Username, req.Password); err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return respondError(c, http.StatusInternalServerError, err.Error())
 	}
 
 	// Auto-login after register
@@ -69,7 +82,7 @@ func (h *AuthHandler) Register(c echo.Context) error {
 func (h *AuthHandler) GetStatus(c echo.Context) error {
 	count, err := h.authService.UserCount()
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "database error"})
+		return respondError(c, http.StatusInternalServerError, "database error")
 	}
 	isIngress := security.IsTrustedIngressRequest(c)
 
@@ -82,11 +95,11 @@ func (h *AuthHandler) GetStatus(c echo.Context) error {
 func (h *AuthHandler) GenerateDeviceToken(c echo.Context) error {
 	userID, ok := c.Get("user_id").(uint)
 	if !ok {
-		return c.JSON(http.StatusUnauthorized, map[string]string{"error": "user id not found in context"})
+		return respondError(c, http.StatusUnauthorized, "user id not found in context")
 	}
 	username, ok := c.Get("username").(string)
 	if !ok {
-		return c.JSON(http.StatusUnauthorized, map[string]string{"error": "username not found in context"})
+		return respondError(c, http.StatusUnauthorized, "username not found in context")
 	}
 
 	var req struct {
@@ -94,7 +107,7 @@ func (h *AuthHandler) GenerateDeviceToken(c echo.Context) error {
 		DeviceID *uint  `json:"device_id"`
 	}
 	if err := c.Bind(&req); err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid request"})
+		return respondError(c, http.StatusBadRequest, "invalid request")
 	}
 	if req.Name == "" {
 		req.Name = "Device Token"
@@ -102,7 +115,7 @@ func (h *AuthHandler) GenerateDeviceToken(c echo.Context) error {
 
 	token, err := h.authService.GenerateDeviceToken(userID, username, req.Name, req.DeviceID)
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to generate token"})
+		return respondError(c, http.StatusInternalServerError, "failed to generate token")
 	}
 
 	return c.JSON(http.StatusOK, map[string]string{"token": token})
@@ -111,7 +124,7 @@ func (h *AuthHandler) GenerateDeviceToken(c echo.Context) error {
 func (h *AuthHandler) UpdateTokenDevice(c echo.Context) error {
 	userID, ok := c.Get("user_id").(uint)
 	if !ok {
-		return c.JSON(http.StatusUnauthorized, map[string]string{"error": "user id not found in context"})
+		return respondError(c, http.StatusUnauthorized, "user id not found in context")
 	}
 
 	var req struct {
@@ -119,11 +132,11 @@ func (h *AuthHandler) UpdateTokenDevice(c echo.Context) error {
 		DeviceID *uint `json:"device_id"`
 	}
 	if err := c.Bind(&req); err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid request"})
+		return respondError(c, http.StatusBadRequest, "invalid request")
 	}
 
 	if err := h.authService.UpdateTokenDevice(userID, req.ID, req.DeviceID); err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to update token"})
+		return respondError(c, http.StatusInternalServerError, "failed to update token")
 	}
 
 	return c.JSON(http.StatusOK, map[string]string{"message": "token updated"})
@@ -132,12 +145,12 @@ func (h *AuthHandler) UpdateTokenDevice(c echo.Context) error {
 func (h *AuthHandler) ListTokens(c echo.Context) error {
 	userID, ok := c.Get("user_id").(uint)
 	if !ok {
-		return c.JSON(http.StatusUnauthorized, map[string]string{"error": "user id not found in context"})
+		return respondError(c, http.StatusUnauthorized, "user id not found in context")
 	}
 
 	tokens, err := h.authService.ListTokens(userID)
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to list tokens"})
+		return respondError(c, http.StatusInternalServerError, "failed to list tokens")
 	}
 
 	return c.JSON(http.StatusOK, tokens)
@@ -146,18 +159,18 @@ func (h *AuthHandler) ListTokens(c echo.Context) error {
 func (h *AuthHandler) RevokeToken(c echo.Context) error {
 	userID, ok := c.Get("user_id").(uint)
 	if !ok {
-		return c.JSON(http.StatusUnauthorized, map[string]string{"error": "user id not found in context"})
+		return respondError(c, http.StatusUnauthorized, "user id not found in context")
 	}
 
 	var req struct {
 		ID uint `param:"id"`
 	}
 	if err := c.Bind(&req); err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid request"})
+		return respondError(c, http.StatusBadRequest, "invalid request")
 	}
 
 	if err := h.authService.RevokeToken(userID, req.ID); err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to revoke token"})
+		return respondError(c, http.StatusInternalServerError, "failed to revoke token")
 	}
 
 	return c.JSON(http.StatusOK, map[string]string{"message": "token revoked"})
@@ -166,12 +179,12 @@ func (h *AuthHandler) RevokeToken(c echo.Context) error {
 func (h *AuthHandler) ListSessions(c echo.Context) error {
 	userID, ok := c.Get("user_id").(uint)
 	if !ok {
-		return c.JSON(http.StatusUnauthorized, map[string]string{"error": "user id not found in context"})
+		return respondError(c, http.StatusUnauthorized, "user id not found in context")
 	}
 
 	sessions, err := h.authService.ListSessions(userID)
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to list sessions"})
+		return respondError(c, http.StatusInternalServerError, "failed to list sessions")
 	}
 
 	return c.JSON(http.StatusOK, sessions)
@@ -180,18 +193,18 @@ func (h *AuthHandler) ListSessions(c echo.Context) error {
 func (h *AuthHandler) RevokeSession(c echo.Context) error {
 	userID, ok := c.Get("user_id").(uint)
 	if !ok {
-		return c.JSON(http.StatusUnauthorized, map[string]string{"error": "user id not found in context"})
+		return respondError(c, http.StatusUnauthorized, "user id not found in context")
 	}
 
 	var req struct {
 		ID uint `param:"id"`
 	}
 	if err := c.Bind(&req); err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid request"})
+		return respondError(c, http.StatusBadRequest, "invalid request")
 	}
 
 	if err := h.authService.RevokeSession(userID, req.ID); err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to revoke session"})
+		return respondError(c, http.StatusInternalServerError, "failed to revoke session")
 	}
 
 	return c.JSON(http.StatusOK, map[string]string{"message": "session revoked"})
@@ -200,7 +213,7 @@ func (h *AuthHandler) RevokeSession(c echo.Context) error {
 func (h *AuthHandler) UpdateAccount(c echo.Context) error {
 	userID, ok := c.Get("user_id").(uint)
 	if !ok {
-		return c.JSON(http.StatusUnauthorized, map[string]string{"error": "user id not found in context"})
+		return respondError(c, http.StatusUnauthorized, "user id not found in context")
 	}
 
 	var req struct {
@@ -209,15 +222,15 @@ func (h *AuthHandler) UpdateAccount(c echo.Context) error {
 		NewPassword string `json:"new_password"`
 	}
 	if err := c.Bind(&req); err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid request"})
+		return respondError(c, http.StatusBadRequest, "invalid request")
 	}
 
 	if req.OldPassword == "" {
-		return c.JSON(http.StatusBadRequest, map[string]string{"error": "current password is required"})
+		return respondError(c, http.StatusBadRequest, "current password is required")
 	}
 
 	if err := h.authService.UpdateAccount(userID, req.OldPassword, req.NewUsername, req.NewPassword); err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return respondError(c, http.StatusBadRequest, err.Error())
 	}
 
 	return c.JSON(http.StatusOK, map[string]string{"message": "account updated successfully"})

@@ -1,16 +1,921 @@
-```html
 <template>
-  <div class="pa-4">
-    <!-- Gallery Card -->
+  <div class="pa-1 pa-sm-4">
+    <!-- Sources Card (gallery on top, settings below) -->
     <v-card class="mb-6">
-      <v-tabs v-model="galleryTab" color="primary">
+      <v-tabs v-model="sourceTab" color="primary" show-arrows>
         <v-tab value="gallery">Gallery</v-tab>
         <v-tab value="immich">Immich</v-tab>
-        <v-tab value="google_photos">Google Photos</v-tab>
         <v-tab value="synology_photos">Synology</v-tab>
+        <v-tab value="google_photos">Google</v-tab>
+        <v-tab value="unsplash">Unsplash</v-tab>
+        <v-tab value="pexels">Pexels</v-tab>
+        <v-tab value="url">URL Proxy</v-tab>
+        <v-tab value="ai_generation">AI Generation</v-tab>
       </v-tabs>
       <v-card-text>
-        <Gallery />
+        <div v-if="sourceHasGallery">
+          <Gallery />
+          <v-divider class="my-6"></v-divider>
+        </div>
+        <v-window v-model="sourceTab" :touch="false">
+          <!-- URL Proxy -->
+          <v-window-item value="url">
+            <v-card-text>
+              <v-alert
+                type="info"
+                variant="tonal"
+                class="mb-4"
+                density="compact"
+              >
+                Add external image URLs to be served by the photoframe. You can
+                bind URLs to specific devices or leave them global.
+              </v-alert>
+
+              <div class="d-flex justify-end mb-4">
+                <v-btn
+                  color="primary"
+                  prepend-icon="mdi-plus"
+                  class="mb-4"
+                  @click="openAddURLDialog"
+                >
+                  Add URL Source
+                </v-btn>
+              </div>
+
+              <v-table density="comfortable" class="border rounded">
+                <thead>
+                  <tr>
+                    <th>URL</th>
+                    <th>Bound Devices</th>
+                    <th class="text-right">Action</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="src in urlSources" :key="src.id">
+                    <td class="text-truncate" style="max-width: 300px">
+                      <a :href="src.url" target="_blank">{{ src.url }}</a>
+                    </td>
+                    <td>
+                      <div v-if="src.device_ids && src.device_ids.length">
+                        <v-chip
+                          v-for="did in src.device_ids"
+                          :key="did"
+                          size="x-small"
+                          class="mr-1"
+                        >
+                          {{ getDeviceName(did) }}
+                        </v-chip>
+                      </div>
+                      <span v-else class="text-grey text-caption">Global</span>
+                    </td>
+                    <td class="text-right">
+                      <v-btn
+                        color="primary"
+                        variant="text"
+                        size="small"
+                        icon="mdi-pencil"
+                        class="mr-2"
+                        @click="openEditURLDialog(src)"
+                      ></v-btn>
+                      <v-btn
+                        color="error"
+                        variant="text"
+                        size="small"
+                        icon="mdi-delete"
+                        @click="deleteURLSourceWrapper(src.id)"
+                      ></v-btn>
+                    </td>
+                  </tr>
+                  <tr v-if="urlSources.length === 0">
+                    <td colspan="4" class="text-center text-grey py-4">
+                      No URL sources added.
+                    </td>
+                  </tr>
+                </tbody>
+              </v-table>
+            </v-card-text>
+          </v-window-item>
+
+          <!-- Add/Edit URL Dialog -->
+          <v-dialog v-model="showAddURLDialog" max-width="500px">
+            <v-card>
+              <v-card-title>{{
+                isEditingURL ? 'Edit URL Source' : 'Add URL Source'
+              }}</v-card-title>
+              <v-card-text>
+                <v-form @submit.prevent="saveURLSource">
+                  <v-text-field
+                    v-model="newURL.url"
+                    label="Image URL"
+                    placeholder="https://example.com/image.jpg"
+                    variant="outlined"
+                    class="mb-2"
+                    :rules="[(v) => !!v || 'URL is required']"
+                  ></v-text-field>
+
+                  <v-select
+                    v-model="newURL.device_ids"
+                    :items="availableDevices"
+                    item-title="name"
+                    item-value="id"
+                    label="Bind to Devices (Optional)"
+                    placeholder="Leave empty for Global"
+                    variant="outlined"
+                    multiple
+                    chips
+                    class="mb-4"
+                    hint="If selected, only these devices will see this image."
+                    persistent-hint
+                  ></v-select>
+                </v-form>
+              </v-card-text>
+              <v-card-actions>
+                <v-spacer></v-spacer>
+                <v-btn
+                  color="grey"
+                  variant="text"
+                  @click="showAddURLDialog = false"
+                  >Cancel</v-btn
+                >
+                <v-btn color="primary" @click="saveURLSource">Save</v-btn>
+              </v-card-actions>
+            </v-card>
+          </v-dialog>
+
+          <!-- Google (Photos + Calendar) -->
+          <v-window-item value="google_photos">
+            <v-card-text>
+              <!-- Shared Google API Credentials -->
+              <h3 class="text-subtitle-1 font-weight-bold mb-3">
+                Google API Credentials
+              </h3>
+
+              <v-alert
+                type="info"
+                variant="tonal"
+                class="mb-4"
+                density="compact"
+              >
+                <div class="text-body-2">
+                  These credentials are shared by Google Photos and Google
+                  Calendar. Create a project in
+                  <a href="https://console.cloud.google.com/" target="_blank"
+                    >Google Cloud Console</a
+                  >
+                  and add the redirect URI:
+                  <br />
+                  <code
+                    >http://[YOUR_SERVER_IP]:8080/api/auth/google/callback</code
+                  >
+                </div>
+              </v-alert>
+
+              <v-text-field
+                v-model="form.google_client_id"
+                label="Client ID"
+                variant="outlined"
+                class="mb-2"
+              ></v-text-field>
+
+              <v-text-field
+                v-model="form.google_client_secret"
+                label="Client Secret"
+                type="password"
+                variant="outlined"
+                class="mb-4"
+              ></v-text-field>
+
+              <v-btn color="grey-darken-1" @click="save" class="mb-2"
+                >Save Credentials</v-btn
+              >
+
+              <!-- Photos Section -->
+              <v-divider class="my-6"></v-divider>
+              <h3 class="text-subtitle-1 font-weight-bold mb-3">Photos</h3>
+
+              <div v-if="form.google_connected === 'true'">
+                <v-alert
+                  type="success"
+                  variant="tonal"
+                  class="mb-4"
+                  density="compact"
+                  icon="mdi-check-circle"
+                >
+                  Connected to Google Photos
+                </v-alert>
+
+                <div class="d-flex flex-wrap ga-2 mt-4">
+                  <v-btn
+                    color="warning"
+                    :loading="deletingAllPhotos"
+                    @click="deleteAllPhotosForSource('google_photos')"
+                    >Clear All Photos</v-btn
+                  >
+                  <v-btn color="error" variant="text" @click="logoutGoogle">
+                    Disconnect Google Photos
+                  </v-btn>
+                </div>
+              </div>
+
+              <div v-else>
+                <v-btn
+                  v-if="form.google_client_id && form.google_client_secret"
+                  color="primary"
+                  @click="connectGoogle"
+                >
+                  Authorize Google Photos
+                </v-btn>
+                <v-alert
+                  v-else
+                  type="warning"
+                  variant="tonal"
+                  density="compact"
+                >
+                  Enter Google API credentials above first.
+                </v-alert>
+              </div>
+
+              <!-- Calendar Section -->
+              <v-divider class="my-6"></v-divider>
+              <h3 class="text-subtitle-1 font-weight-bold mb-3">Calendar</h3>
+
+              <div v-if="form.google_calendar_connected === 'true'">
+                <v-alert
+                  type="success"
+                  variant="tonal"
+                  class="mb-4"
+                  density="compact"
+                  icon="mdi-check-circle"
+                >
+                  Google Calendar connected
+                </v-alert>
+
+                <v-btn
+                  color="error"
+                  variant="text"
+                  @click="logoutGoogleCalendar"
+                >
+                  Disconnect Google Calendar
+                </v-btn>
+              </div>
+
+              <div v-else>
+                <v-alert
+                  type="info"
+                  variant="tonal"
+                  class="mb-4"
+                  density="compact"
+                >
+                  Connect a Google account for Calendar integration. This can be
+                  a different account than Google Photos.
+                </v-alert>
+
+                <v-btn
+                  v-if="form.google_client_id && form.google_client_secret"
+                  color="primary"
+                  @click="connectGoogleCalendar"
+                >
+                  Authorize Google Calendar
+                </v-btn>
+                <v-alert
+                  v-else
+                  type="warning"
+                  variant="tonal"
+                  density="compact"
+                >
+                  Enter Google API credentials above first.
+                </v-alert>
+              </div>
+            </v-card-text>
+          </v-window-item>
+
+          <!-- Synology -->
+          <v-window-item value="synology_photos">
+            <v-card-text>
+              <div v-if="form.synology_sid">
+                <v-alert
+                  type="success"
+                  variant="tonal"
+                  class="mb-4"
+                  density="compact"
+                  icon="mdi-check-circle"
+                >
+                  Connected to Synology Photos ({{ form.synology_account }} @
+                  {{ form.synology_url }})
+                </v-alert>
+
+                <v-row class="mt-2">
+                  <v-col cols="12">
+                    <div class="d-flex align-center justify-space-between mb-1">
+                      <h3 class="text-subtitle-1 font-weight-bold">
+                        Albums to sync
+                      </h3>
+                      <div class="d-flex ga-2">
+                        <v-btn
+                          size="small"
+                          variant="text"
+                          prepend-icon="mdi-refresh"
+                          :loading="synologyStore.loading"
+                          @click="loadAlbums"
+                          >Refresh albums</v-btn
+                        >
+                      </div>
+                    </div>
+                    <div class="text-caption text-grey mb-2">
+                      Choose which Synology Photos albums to pull photos from.
+                      Albums other DSM users shared with this account are listed
+                      too. Saving replaces the entire sync set.
+                    </div>
+
+                    <AlbumPicker
+                      v-model="synologySyncAlbumIds"
+                      :albums="synologyStore.albums"
+                      label-field="name"
+                      badge-field="shared_with_me"
+                      badge-text="Shared with me"
+                      stringify
+                      empty-text='No albums found. Click "Refresh albums" to load them from Synology.'
+                    ></AlbumPicker>
+                  </v-col>
+                </v-row>
+
+                <v-row class="mt-1">
+                  <v-col cols="12" md="6">
+                    <v-checkbox
+                      v-model="form.synology_auto_sync_enabled"
+                      label="Auto Sync Album"
+                      color="primary"
+                      density="compact"
+                      hide-details
+                      @update:model-value="saveSettingsInternal()"
+                    ></v-checkbox>
+                  </v-col>
+                  <v-col cols="12" md="6">
+                    <v-select
+                      v-model="form.synology_auto_sync_interval_minutes"
+                      :items="autoSyncIntervalOptions"
+                      item-title="title"
+                      item-value="value"
+                      label="Auto Sync Interval"
+                      variant="outlined"
+                      density="compact"
+                      :disabled="!form.synology_auto_sync_enabled"
+                      hint="How often to refresh photos from the selected album"
+                      persistent-hint
+                      @update:model-value="saveSettingsInternal()"
+                    ></v-select>
+                  </v-col>
+                </v-row>
+
+                <div class="d-flex flex-wrap ga-2 mt-4">
+                  <v-btn
+                    color="primary"
+                    :loading="synologyStore.loading"
+                    @click="syncSynology"
+                    >Sync Now</v-btn
+                  >
+                  <v-btn color="warning" @click="clearSynology"
+                    >Clear All Photos</v-btn
+                  >
+                  <v-btn color="error" variant="text" @click="logoutSynology"
+                    >Disconnect</v-btn
+                  >
+                </div>
+              </div>
+
+              <div v-else>
+                <v-text-field
+                  v-model="form.synology_url"
+                  label="NAS URL"
+                  placeholder="https://192.168.1.10:5001"
+                  variant="outlined"
+                  class="mb-2"
+                ></v-text-field>
+
+                <v-text-field
+                  v-model="form.synology_account"
+                  label="Account"
+                  variant="outlined"
+                  class="mb-2"
+                ></v-text-field>
+
+                <v-text-field
+                  v-model="form.synology_password"
+                  label="Password"
+                  type="password"
+                  variant="outlined"
+                  class="mb-2"
+                ></v-text-field>
+
+                <v-checkbox
+                  v-model="form.synology_skip_cert"
+                  label="Skip Certificate Verification (Insecure)"
+                  color="primary"
+                  density="compact"
+                ></v-checkbox>
+
+                <v-text-field
+                  v-model="form.synology_otp_code"
+                  label="OTP Code (If 2FA enabled)"
+                  placeholder="6-digit code"
+                  variant="outlined"
+                  class="mb-4"
+                ></v-text-field>
+
+                <v-btn
+                  color="primary"
+                  :disabled="
+                    !form.synology_url ||
+                    !form.synology_account ||
+                    !form.synology_password
+                  "
+                  :loading="synologyStore.loading"
+                  @click="testSynology"
+                >
+                  Connect
+                </v-btn>
+              </div>
+            </v-card-text>
+          </v-window-item>
+
+          <!-- Immich -->
+          <v-window-item value="immich">
+            <v-card-text>
+              <div v-if="immichConnected">
+                <v-alert
+                  type="success"
+                  variant="tonal"
+                  class="mb-4"
+                  density="compact"
+                  icon="mdi-check-circle"
+                >
+                  Connected to Immich ({{ form.immich_url }})
+                </v-alert>
+
+                <v-row class="mt-2">
+                  <v-col cols="12">
+                    <div class="d-flex align-center justify-space-between mb-1">
+                      <h3 class="text-subtitle-1 font-weight-bold">
+                        Albums to sync
+                      </h3>
+                      <div class="d-flex ga-2">
+                        <v-btn
+                          size="small"
+                          variant="text"
+                          prepend-icon="mdi-refresh"
+                          :loading="immichStore.loading"
+                          @click="loadImmichAlbums"
+                          >Refresh albums</v-btn
+                        >
+                      </div>
+                    </div>
+                    <div class="text-caption text-grey mb-2">
+                      Choose which Immich albums and collections to pull photos
+                      from. Saving replaces the entire sync set.
+                    </div>
+
+                    <AlbumPicker
+                      v-model="syncAlbumIds"
+                      :albums="immichStore.albums"
+                      label-field="albumName"
+                      empty-text='No albums found. Click "Refresh albums" to load them from Immich.'
+                    >
+                      <template #prepend>
+                        <v-list-item>
+                          <v-checkbox
+                            v-model="syncFavorites"
+                            label="Favorites"
+                            color="primary"
+                            density="compact"
+                            hide-details
+                          ></v-checkbox>
+                        </v-list-item>
+                        <v-list-item>
+                          <v-checkbox
+                            v-model="syncAll"
+                            label="All Photos (entire library)"
+                            color="primary"
+                            density="compact"
+                            hide-details
+                          ></v-checkbox>
+                        </v-list-item>
+                        <v-list-item>
+                          <v-checkbox
+                            v-model="syncMemories"
+                            label="Memories (on this day)"
+                            color="primary"
+                            density="compact"
+                            hide-details
+                          ></v-checkbox>
+                        </v-list-item>
+                      </template>
+                    </AlbumPicker>
+                  </v-col>
+                </v-row>
+
+                <v-row v-if="syncMemories" class="mt-0">
+                  <v-col cols="12">
+                    <v-select
+                      v-model="form.immich_memory_mode"
+                      :items="immichMemoryModeOptions"
+                      item-title="title"
+                      item-value="value"
+                      label="Memory Years"
+                      variant="outlined"
+                      density="compact"
+                      hint="Shuffle across all past years, or only the most recent year's photos"
+                      persistent-hint
+                      @update:model-value="saveSettingsInternal()"
+                    ></v-select>
+                  </v-col>
+                </v-row>
+
+                <v-row class="mt-1">
+                  <v-col cols="12" md="6">
+                    <v-checkbox
+                      v-model="form.immich_auto_sync_enabled"
+                      label="Auto Sync Album"
+                      color="primary"
+                      density="compact"
+                      hide-details
+                      @update:model-value="saveSettingsInternal()"
+                    ></v-checkbox>
+                  </v-col>
+                  <v-col cols="12" md="6">
+                    <v-select
+                      v-model="form.immich_auto_sync_interval_minutes"
+                      :items="autoSyncIntervalOptions"
+                      item-title="title"
+                      item-value="value"
+                      label="Auto Sync Interval"
+                      variant="outlined"
+                      density="compact"
+                      :disabled="!form.immich_auto_sync_enabled"
+                      hint="How often to refresh photos from the selected album"
+                      persistent-hint
+                      @update:model-value="saveSettingsInternal()"
+                    ></v-select>
+                  </v-col>
+                </v-row>
+
+                <div class="d-flex flex-wrap ga-2 mt-4">
+                  <v-btn
+                    color="primary"
+                    :loading="immichStore.loading"
+                    @click="syncImmich"
+                    >Sync Now</v-btn
+                  >
+                  <v-btn color="warning" @click="clearImmich"
+                    >Clear All Photos</v-btn
+                  >
+                  <v-btn color="error" variant="text" @click="disconnectImmich"
+                    >Disconnect</v-btn
+                  >
+                </div>
+              </div>
+
+              <div v-else>
+                <v-text-field
+                  v-model="form.immich_url"
+                  label="Immich Server URL"
+                  placeholder="http://192.168.1.10:2283"
+                  variant="outlined"
+                  class="mb-2"
+                ></v-text-field>
+
+                <v-text-field
+                  v-model="form.immich_api_key"
+                  label="API Key"
+                  type="password"
+                  variant="outlined"
+                  class="mb-4"
+                ></v-text-field>
+
+                <v-btn
+                  color="primary"
+                  :disabled="!form.immich_url || !form.immich_api_key"
+                  :loading="immichStore.loading"
+                  @click="testImmich"
+                >
+                  Connect
+                </v-btn>
+              </div>
+            </v-card-text>
+          </v-window-item>
+
+          <!-- Unsplash -->
+          <v-window-item value="unsplash">
+            <v-card-text>
+              <v-alert
+                type="info"
+                variant="tonal"
+                class="mb-4"
+                density="compact"
+              >
+                Unsplash provides free high-resolution photos. Enter your
+                Unsplash API access key, then add search topics — each topic
+                becomes a synced album.
+              </v-alert>
+
+              <div v-if="unsplashConnected">
+                <v-alert
+                  type="success"
+                  variant="tonal"
+                  class="mb-4"
+                  density="compact"
+                  icon="mdi-check-circle"
+                >
+                  Connected to Unsplash
+                </v-alert>
+
+                <TopicManager
+                  title="Search topics"
+                  :store="unsplashStore"
+                  hint="Each topic becomes an album of matching photos."
+                  :randomize-results="form.unsplash_randomize_results"
+                  :auto-sync-enabled="form.unsplash_auto_sync_enabled"
+                  :auto-sync-interval="form.unsplash_auto_sync_interval_minutes"
+                  :auto-sync-options="autoSyncIntervalOptions"
+                  @update:randomize-results="
+                    form.unsplash_randomize_results = $event;
+                    saveSettingsInternal();
+                  "
+                  @update:auto-sync-enabled="
+                    form.unsplash_auto_sync_enabled = $event;
+                    saveSettingsInternal();
+                  "
+                  @update:auto-sync-interval="
+                    form.unsplash_auto_sync_interval_minutes = $event;
+                    saveSettingsInternal();
+                  "
+                  @save="(topics) => saveTopics('unsplash', topics)"
+                  @sync="syncTopicSource('unsplash')"
+                  @clear="clearTopicSource('unsplash')"
+                >
+                  <template #actions>
+                    <v-btn
+                      color="error"
+                      variant="text"
+                      @click="disconnectUnsplash"
+                      >Disconnect</v-btn
+                    >
+                  </template>
+                </TopicManager>
+              </div>
+
+              <div v-else>
+                <v-text-field
+                  v-model="form.unsplash_api_key"
+                  label="Unsplash Access Key"
+                  hint="Your app's Access Key — the Secret Key is not needed"
+                  persistent-hint
+                  type="password"
+                  variant="outlined"
+                  density="compact"
+                  class="mb-4"
+                ></v-text-field>
+
+                <v-btn
+                  color="primary"
+                  :disabled="!form.unsplash_api_key"
+                  @click="connectUnsplash"
+                >
+                  Connect
+                </v-btn>
+              </div>
+            </v-card-text>
+          </v-window-item>
+
+          <!-- Pexels -->
+          <v-window-item value="pexels">
+            <v-card-text>
+              <v-alert
+                type="info"
+                variant="tonal"
+                class="mb-4"
+                density="compact"
+              >
+                Pexels provides free stock photos. Enter your Pexels API key,
+                then add search topics — each topic becomes a synced album.
+              </v-alert>
+
+              <div v-if="pexelsConnected">
+                <v-alert
+                  type="success"
+                  variant="tonal"
+                  class="mb-4"
+                  density="compact"
+                  icon="mdi-check-circle"
+                >
+                  Connected to Pexels
+                </v-alert>
+
+                <TopicManager
+                  title="Search topics"
+                  :store="pexelsStore"
+                  hint="Each topic becomes an album of matching photos."
+                  :randomize-results="form.pexels_randomize_results"
+                  :auto-sync-enabled="form.pexels_auto_sync_enabled"
+                  :auto-sync-interval="form.pexels_auto_sync_interval_minutes"
+                  :auto-sync-options="autoSyncIntervalOptions"
+                  @update:randomize-results="
+                    form.pexels_randomize_results = $event;
+                    saveSettingsInternal();
+                  "
+                  @update:auto-sync-enabled="
+                    form.pexels_auto_sync_enabled = $event;
+                    saveSettingsInternal();
+                  "
+                  @update:auto-sync-interval="
+                    form.pexels_auto_sync_interval_minutes = $event;
+                    saveSettingsInternal();
+                  "
+                  @save="(topics) => saveTopics('pexels', topics)"
+                  @sync="syncTopicSource('pexels')"
+                  @clear="clearTopicSource('pexels')"
+                >
+                  <template #actions>
+                    <v-btn
+                      color="error"
+                      variant="text"
+                      @click="disconnectPexels"
+                      >Disconnect</v-btn
+                    >
+                  </template>
+                </TopicManager>
+              </div>
+
+              <div v-else>
+                <v-text-field
+                  v-model="form.pexels_api_key"
+                  label="Pexels API Key"
+                  type="password"
+                  variant="outlined"
+                  density="compact"
+                  class="mb-4"
+                ></v-text-field>
+
+                <v-btn
+                  color="primary"
+                  :disabled="!form.pexels_api_key"
+                  @click="connectPexels"
+                >
+                  Connect
+                </v-btn>
+              </div>
+            </v-card-text>
+          </v-window-item>
+
+          <!-- Gallery -->
+          <v-window-item value="gallery">
+            <v-card-text>
+              <h3 class="text-subtitle-1 font-weight-bold mb-1">
+                Telegram Bot (Upload)
+              </h3>
+              <div class="text-caption text-grey mb-3">
+                Optional. Configure a Telegram bot to upload photos into the
+                gallery from your phone.
+              </div>
+
+              <div v-if="form.telegram_bot_token">
+                <v-alert
+                  type="success"
+                  variant="tonal"
+                  class="mb-4"
+                  density="compact"
+                  icon="mdi-check-circle"
+                >
+                  Telegram Bot Configured
+                </v-alert>
+
+                <v-divider class="my-4"></v-divider>
+
+                <h3 class="text-subtitle-1 font-weight-bold mb-2">
+                  Push to Device
+                </h3>
+                <div class="text-caption text-grey mb-2">
+                  When enabled, photos uploaded via the Telegram bot are also
+                  pushed to the selected devices immediately. They are added to
+                  the gallery either way.
+                </div>
+
+                <v-checkbox
+                  v-model="form.telegram_push_enabled"
+                  label="Enable Push to Device"
+                  color="primary"
+                  hide-details
+                  density="compact"
+                  @update:model-value="saveSettingsInternal()"
+                ></v-checkbox>
+
+                <v-expand-transition>
+                  <div v-if="form.telegram_push_enabled" class="mt-2">
+                    <v-select
+                      v-model="form.telegram_target_device_id"
+                      :items="availableDevices"
+                      item-title="name"
+                      item-value="id"
+                      label="Target Devices"
+                      variant="outlined"
+                      density="compact"
+                      hint="Select the devices to display photos on"
+                      persistent-hint
+                      multiple
+                      chips
+                      closable-chips
+                      @update:model-value="saveSettingsInternal()"
+                    ></v-select>
+                  </div>
+                </v-expand-transition>
+
+                <div class="d-flex flex-wrap ga-2 mt-4">
+                  <v-btn
+                    color="warning"
+                    :loading="deletingAllPhotos"
+                    @click="deleteAllPhotosForSource('gallery')"
+                    >Clear All Photos</v-btn
+                  >
+                  <v-btn
+                    color="error"
+                    variant="text"
+                    @click="disconnectTelegram"
+                    >Disconnect</v-btn
+                  >
+                </div>
+              </div>
+
+              <div v-else>
+                <v-text-field
+                  v-model="form.telegram_bot_token"
+                  label="Telegram Bot Token"
+                  placeholder="Enter Bot Token"
+                  variant="outlined"
+                  hint="Send photos to your bot to add them to the gallery."
+                  persistent-hint
+                ></v-text-field>
+
+                <v-btn color="primary" class="mt-4" @click="save"
+                  >Save Token</v-btn
+                >
+              </div>
+            </v-card-text>
+          </v-window-item>
+
+          <!-- AI Generation -->
+          <v-window-item value="ai_generation">
+            <v-card-text>
+              <v-alert
+                type="info"
+                variant="tonal"
+                class="mb-4"
+                density="compact"
+              >
+                Generate images using AI (OpenAI or Google Gemini). Configure
+                API keys below, then set the prompt/model per-device in the Edit
+                Device dialog.
+              </v-alert>
+
+              <v-text-field
+                v-model="form.openai_api_key"
+                label="OpenAI API Key"
+                type="password"
+                variant="outlined"
+                class="mb-1"
+                hint="sk-..."
+                persistent-hint
+              ></v-text-field>
+              <div class="text-caption text-grey ml-2 mb-4">
+                Get your API key at
+                <a
+                  href="https://platform.openai.com/api-keys"
+                  target="_blank"
+                  class="text-primary text-decoration-none"
+                  >platform.openai.com</a
+                >
+              </div>
+
+              <v-text-field
+                v-model="form.google_api_key"
+                label="Google Gemini API Key"
+                type="password"
+                variant="outlined"
+                class="mb-1"
+                persistent-hint
+              ></v-text-field>
+              <div class="text-caption text-grey ml-2 mb-4">
+                Get your API key at
+                <a
+                  href="https://aistudio.google.com/app/apikey"
+                  target="_blank"
+                  class="text-primary text-decoration-none"
+                  >aistudio.google.com</a
+                >
+              </div>
+
+              <v-btn color="primary" @click="save">Save API Keys</v-btn>
+            </v-card-text>
+          </v-window-item>
+        </v-window>
       </v-card-text>
     </v-card>
 
@@ -34,1089 +939,35 @@
       <div v-else>
         <v-tabs v-model="activeMainTab" color="primary" grow>
           <v-tab value="devices">Devices</v-tab>
-          <v-tab value="datasources">Data Sources</v-tab>
-          <v-tab value="security">Security</v-tab>
+          <v-tab value="security">System</v-tab>
         </v-tabs>
 
-        <v-window v-model="activeMainTab">
-          <!-- Data Sources Tab -->
-          <v-window-item value="datasources">
-            <v-tabs
-              v-model="activeDataSourceTab"
-              color="primary"
-              density="compact"
-              class="mb-4"
-            >
-              <v-tab value="gallery">Gallery</v-tab>
-              <v-tab value="immich">Immich</v-tab>
-              <v-tab value="google">Google</v-tab>
-              <v-tab value="synology_photos">Synology</v-tab>
-              <v-tab value="url">URL Proxy</v-tab>
-              <v-tab value="ai_generation">AI Generation</v-tab>
-            </v-tabs>
-
-            <v-window v-model="activeDataSourceTab">
-              <!-- URL Proxy -->
-              <v-window-item value="url">
-                <v-card-text>
-                  <v-alert
-                    type="info"
-                    variant="tonal"
-                    class="mb-4"
-                    density="compact"
-                  >
-                    Add external image URLs to be served by the photoframe. You
-                    can bind URLs to specific devices or leave them global.
-                  </v-alert>
-
-                  <v-text-field
-                    :model-value="getImageUrl('url_proxy')"
-                    label="Image Endpoint URL (for firmware config)"
-                    readonly
-                    variant="outlined"
-                    density="compact"
-                    append-inner-icon="mdi-content-copy"
-                    @click:append-inner="
-                      copyToClipboard(getImageUrl('url_proxy'))
-                    "
-                    class="mb-4"
-                  ></v-text-field>
-
-                  <div class="d-flex justify-end mb-4">
-                    <v-btn
-                      color="primary"
-                      prepend-icon="mdi-plus"
-                      class="mb-4"
-                      @click="openAddURLDialog"
-                    >
-                      Add URL Source
-                    </v-btn>
-                  </div>
-
-                  <v-table density="comfortable" class="border rounded">
-                    <thead>
-                      <tr>
-                        <th>URL</th>
-                        <th>Bound Devices</th>
-                        <th class="text-right">Action</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      <tr v-for="src in urlSources" :key="src.id">
-                        <td class="text-truncate" style="max-width: 300px">
-                          <a :href="src.url" target="_blank">{{ src.url }}</a>
-                        </td>
-                        <td>
-                          <div v-if="src.device_ids && src.device_ids.length">
-                            <v-chip
-                              v-for="did in src.device_ids"
-                              :key="did"
-                              size="x-small"
-                              class="mr-1"
-                            >
-                              {{ getDeviceName(did) }}
-                            </v-chip>
-                          </div>
-                          <span v-else class="text-grey text-caption"
-                            >Global</span
-                          >
-                        </td>
-                        <td class="text-right">
-                          <v-btn
-                            color="primary"
-                            variant="text"
-                            size="small"
-                            icon="mdi-pencil"
-                            class="mr-2"
-                            @click="openEditURLDialog(src)"
-                          ></v-btn>
-                          <v-btn
-                            color="error"
-                            variant="text"
-                            size="small"
-                            icon="mdi-delete"
-                            @click="deleteURLSourceWrapper(src.id)"
-                          ></v-btn>
-                        </td>
-                      </tr>
-                      <tr v-if="urlSources.length === 0">
-                        <td colspan="4" class="text-center text-grey py-4">
-                          No URL sources added.
-                        </td>
-                      </tr>
-                    </tbody>
-                  </v-table>
-                </v-card-text>
-              </v-window-item>
-
-              <!-- Add/Edit URL Dialog -->
-              <v-dialog v-model="showAddURLDialog" max-width="500px">
-                <v-card>
-                  <v-card-title>{{
-                    isEditingURL ? 'Edit URL Source' : 'Add URL Source'
-                  }}</v-card-title>
-                  <v-card-text>
-                    <v-form @submit.prevent="saveURLSource">
-                      <v-text-field
-                        v-model="newURL.url"
-                        label="Image URL"
-                        placeholder="https://example.com/image.jpg"
-                        variant="outlined"
-                        class="mb-2"
-                        :rules="[(v) => !!v || 'URL is required']"
-                      ></v-text-field>
-
-                      <v-select
-                        v-model="newURL.device_ids"
-                        :items="availableDevices"
-                        item-title="name"
-                        item-value="id"
-                        label="Bind to Devices (Optional)"
-                        placeholder="Leave empty for Global"
-                        variant="outlined"
-                        multiple
-                        chips
-                        class="mb-4"
-                        hint="If selected, only these devices will see this image."
-                        persistent-hint
-                      ></v-select>
-                    </v-form>
-                  </v-card-text>
-                  <v-card-actions>
-                    <v-spacer></v-spacer>
-                    <v-btn
-                      color="grey"
-                      variant="text"
-                      @click="showAddURLDialog = false"
-                      >Cancel</v-btn
-                    >
-                    <v-btn color="primary" @click="saveURLSource">Save</v-btn>
-                  </v-card-actions>
-                </v-card>
-              </v-dialog>
-
-              <!-- Google (Photos + Calendar) -->
-              <v-window-item value="google">
-                <v-card-text>
-                  <!-- Shared Google API Credentials -->
-                  <h3 class="text-subtitle-1 font-weight-bold mb-3">
-                    Google API Credentials
-                  </h3>
-
-                  <v-alert
-                    type="info"
-                    variant="tonal"
-                    class="mb-4"
-                    density="compact"
-                  >
-                    <div class="text-body-2">
-                      These credentials are shared by Google Photos and Google
-                      Calendar. Create a project in
-                      <a
-                        href="https://console.cloud.google.com/"
-                        target="_blank"
-                        >Google Cloud Console</a
-                      >
-                      and add the redirect URI:
-                      <br />
-                      <code
-                        >http://[YOUR_SERVER_IP]:8080/api/auth/google/callback</code
-                      >
-                    </div>
-                  </v-alert>
-
-                  <v-text-field
-                    v-model="form.google_client_id"
-                    label="Client ID"
-                    variant="outlined"
-                    class="mb-2"
-                  ></v-text-field>
-
-                  <v-text-field
-                    v-model="form.google_client_secret"
-                    label="Client Secret"
-                    type="password"
-                    variant="outlined"
-                    class="mb-4"
-                  ></v-text-field>
-
-                  <v-btn color="grey-darken-1" @click="save" class="mb-2"
-                    >Save Credentials</v-btn
-                  >
-
-                  <!-- Photos Section -->
-                  <v-divider class="my-6"></v-divider>
-                  <h3 class="text-subtitle-1 font-weight-bold mb-3">Photos</h3>
-
-                  <div v-if="form.google_connected === 'true'">
-                    <v-alert
-                      type="success"
-                      variant="tonal"
-                      class="mb-4"
-                      density="compact"
-                      icon="mdi-check-circle"
-                    >
-                      Connected to Google Photos
-                    </v-alert>
-
-                    <v-text-field
-                      :model-value="getImageUrl('google_photos')"
-                      label="Image Endpoint URL (for firmware config)"
-                      readonly
-                      variant="outlined"
-                      density="compact"
-                      append-inner-icon="mdi-content-copy"
-                      @click:append-inner="
-                        copyToClipboard(getImageUrl('google_photos'))
-                      "
-                    ></v-text-field>
-
-                    <v-btn color="error" variant="text" @click="logoutGoogle">
-                      Disconnect Google Photos
-                    </v-btn>
-                  </div>
-
-                  <div v-else>
-                    <v-btn
-                      v-if="form.google_client_id && form.google_client_secret"
-                      color="primary"
-                      @click="connectGoogle"
-                    >
-                      Authorize Google Photos
-                    </v-btn>
-                    <v-alert
-                      v-else
-                      type="warning"
-                      variant="tonal"
-                      density="compact"
-                    >
-                      Enter Google API credentials above first.
-                    </v-alert>
-                  </div>
-
-                  <!-- Calendar Section -->
-                  <v-divider class="my-6"></v-divider>
-                  <h3 class="text-subtitle-1 font-weight-bold mb-3">
-                    Calendar
-                  </h3>
-
-                  <div v-if="form.google_calendar_connected === 'true'">
-                    <v-alert
-                      type="success"
-                      variant="tonal"
-                      class="mb-4"
-                      density="compact"
-                      icon="mdi-check-circle"
-                    >
-                      Google Calendar connected
-                    </v-alert>
-
-                    <v-btn
-                      color="error"
-                      variant="text"
-                      @click="logoutGoogleCalendar"
-                    >
-                      Disconnect Google Calendar
-                    </v-btn>
-                  </div>
-
-                  <div v-else>
-                    <v-alert
-                      type="info"
-                      variant="tonal"
-                      class="mb-4"
-                      density="compact"
-                    >
-                      Connect a Google account for Calendar integration. This
-                      can be a different account than Google Photos.
-                    </v-alert>
-
-                    <v-btn
-                      v-if="form.google_client_id && form.google_client_secret"
-                      color="primary"
-                      @click="connectGoogleCalendar"
-                    >
-                      Authorize Google Calendar
-                    </v-btn>
-                    <v-alert
-                      v-else
-                      type="warning"
-                      variant="tonal"
-                      density="compact"
-                    >
-                      Enter Google API credentials above first.
-                    </v-alert>
-                  </div>
-                </v-card-text>
-              </v-window-item>
-
-              <!-- Synology -->
-              <v-window-item value="synology_photos">
-                <v-card-text>
-                  <div v-if="form.synology_sid">
-                    <v-alert
-                      type="success"
-                      variant="tonal"
-                      class="mb-4"
-                      density="compact"
-                      icon="mdi-check-circle"
-                    >
-                      Connected to Synology Photos ({{
-                        form.synology_account
-                      }}
-                      @ {{ form.synology_url }})
-                      <div
-                        v-if="synologyStore.count !== null"
-                        class="text-caption mt-1"
-                      >
-                        {{ synologyStore.count }} photo{{
-                          synologyStore.count !== 1 ? 's' : ''
-                        }}
-                        synced
-                      </div>
-                    </v-alert>
-
-                    <v-text-field
-                      :model-value="getImageUrl('synology_photos')"
-                      label="Image Endpoint URL (for firmware config)"
-                      readonly
-                      variant="outlined"
-                      density="compact"
-                      append-inner-icon="mdi-content-copy"
-                      @click:append-inner="
-                        copyToClipboard(getImageUrl('synology_photos'))
-                      "
-                    ></v-text-field>
-
-                    <v-row class="mt-2">
-                      <v-col cols="12" sm="8">
-                        <v-select
-                          v-model="form.synology_album_id"
-                          :items="synologyAlbumOptions"
-                          item-title="name"
-                          item-value="id"
-                          label="Sync Album"
-                          variant="outlined"
-                          density="compact"
-                          hint="Select an album to sync photos from"
-                          persistent-hint
-                          :rules="[(v: any) => !!v || 'Album is required']"
-                          @update:model-value="saveSettingsInternal()"
-                        ></v-select>
-                      </v-col>
-                      <v-col cols="12" sm="4">
-                        <v-btn
-                          block
-                          variant="outlined"
-                          :loading="synologyStore.loading"
-                          @click="loadAlbums"
-                          >Refresh Albums</v-btn
-                        >
-                      </v-col>
-                    </v-row>
-
-                    <v-row class="mt-1">
-                      <v-col cols="12" md="6">
-                        <v-checkbox
-                          v-model="form.synology_auto_sync_enabled"
-                          label="Auto Sync Album"
-                          color="primary"
-                          density="compact"
-                          hide-details
-                          @update:model-value="saveSettingsInternal()"
-                        ></v-checkbox>
-                      </v-col>
-                      <v-col cols="12" md="6">
-                        <v-select
-                          v-model="form.synology_auto_sync_interval_minutes"
-                          :items="autoSyncIntervalOptions"
-                          item-title="title"
-                          item-value="value"
-                          label="Auto Sync Interval"
-                          variant="outlined"
-                          density="compact"
-                          :disabled="!form.synology_auto_sync_enabled"
-                          hint="How often to refresh photos from the selected album"
-                          persistent-hint
-                          @update:model-value="saveSettingsInternal()"
-                        ></v-select>
-                      </v-col>
-                    </v-row>
-
-                    <div class="d-flex flex-wrap ga-2 mt-4">
-                      <v-btn
-                        color="primary"
-                        :loading="synologyStore.loading"
-                        @click="syncSynology"
-                        >Sync Now</v-btn
-                      >
-                      <v-btn color="warning" @click="clearSynology"
-                        >Clear All Photos</v-btn
-                      >
-                      <v-btn
-                        color="error"
-                        variant="text"
-                        @click="logoutSynology"
-                        >Log Out</v-btn
-                      >
-                    </div>
-                  </div>
-
-                  <div v-else>
-                    <v-text-field
-                      v-model="form.synology_url"
-                      label="NAS URL"
-                      placeholder="https://192.168.1.10:5001"
-                      variant="outlined"
-                      class="mb-2"
-                    ></v-text-field>
-
-                    <v-text-field
-                      v-model="form.synology_account"
-                      label="Account"
-                      variant="outlined"
-                      class="mb-2"
-                    ></v-text-field>
-
-                    <v-text-field
-                      v-model="form.synology_password"
-                      label="Password"
-                      type="password"
-                      variant="outlined"
-                      class="mb-2"
-                    ></v-text-field>
-
-                    <v-checkbox
-                      v-model="form.synology_skip_cert"
-                      label="Skip Certificate Verification (Insecure)"
-                      color="primary"
-                      density="compact"
-                    ></v-checkbox>
-
-                    <v-text-field
-                      v-model="form.synology_otp_code"
-                      label="OTP Code (If 2FA enabled)"
-                      placeholder="6-digit code"
-                      variant="outlined"
-                      class="mb-4"
-                    ></v-text-field>
-
-                    <v-btn
-                      color="primary"
-                      :disabled="
-                        !form.synology_url ||
-                        !form.synology_account ||
-                        !form.synology_password
-                      "
-                      :loading="synologyStore.loading"
-                      @click="testSynology"
-                    >
-                      Connect
-                    </v-btn>
-                  </div>
-                </v-card-text>
-              </v-window-item>
-
-              <!-- Immich -->
-              <v-window-item value="immich">
-                <v-card-text>
-                  <div v-if="immichConnected">
-                    <v-alert
-                      type="success"
-                      variant="tonal"
-                      class="mb-4"
-                      density="compact"
-                      icon="mdi-check-circle"
-                    >
-                      Connected to Immich ({{ form.immich_url }})
-                      <div
-                        v-if="immichStore.count !== null"
-                        class="text-caption mt-1"
-                      >
-                        {{ immichStore.count }} photo{{
-                          immichStore.count !== 1 ? 's' : ''
-                        }}
-                        synced
-                      </div>
-                    </v-alert>
-
-                    <v-text-field
-                      :model-value="getImageUrl('immich')"
-                      label="Image Endpoint URL (for firmware config)"
-                      readonly
-                      variant="outlined"
-                      density="compact"
-                      append-inner-icon="mdi-content-copy"
-                      @click:append-inner="
-                        copyToClipboard(getImageUrl('immich'))
-                      "
-                    ></v-text-field>
-
-                    <v-row class="mt-2">
-                      <v-col cols="12">
-                        <v-select
-                          v-model="form.immich_source_mode"
-                          :items="immichSourceModeOptions"
-                          item-title="title"
-                          item-value="value"
-                          label="Sync Mode"
-                          variant="outlined"
-                          density="compact"
-                          hint="What to pull from Immich"
-                          persistent-hint
-                          @update:model-value="saveSettingsInternal()"
-                        ></v-select>
-                      </v-col>
-                    </v-row>
-
-                    <v-row
-                      v-if="form.immich_source_mode === 'album'"
-                      class="mt-2"
-                    >
-                      <v-col cols="12" sm="8">
-                        <v-select
-                          v-model="form.immich_album_id"
-                          :items="immichAlbumOptions"
-                          item-title="name"
-                          item-value="id"
-                          label="Sync Album"
-                          variant="outlined"
-                          density="compact"
-                          hint="Select an album to sync photos from"
-                          persistent-hint
-                          :rules="[(v: any) => !!v || 'Album is required']"
-                          @update:model-value="saveSettingsInternal()"
-                        ></v-select>
-                      </v-col>
-                      <v-col cols="12" sm="4">
-                        <v-btn
-                          block
-                          variant="outlined"
-                          :loading="immichStore.loading"
-                          @click="loadImmichAlbums"
-                          >Refresh Albums</v-btn
-                        >
-                      </v-col>
-                    </v-row>
-
-                    <v-row class="mt-1">
-                      <v-col cols="12" md="6">
-                        <v-checkbox
-                          v-model="form.immich_auto_sync_enabled"
-                          label="Auto Sync Album"
-                          color="primary"
-                          density="compact"
-                          hide-details
-                          @update:model-value="saveSettingsInternal()"
-                        ></v-checkbox>
-                      </v-col>
-                      <v-col cols="12" md="6">
-                        <v-select
-                          v-model="form.immich_auto_sync_interval_minutes"
-                          :items="autoSyncIntervalOptions"
-                          item-title="title"
-                          item-value="value"
-                          label="Auto Sync Interval"
-                          variant="outlined"
-                          density="compact"
-                          :disabled="!form.immich_auto_sync_enabled"
-                          hint="How often to refresh photos from the selected album"
-                          persistent-hint
-                          @update:model-value="saveSettingsInternal()"
-                        ></v-select>
-                      </v-col>
-                    </v-row>
-
-                    <v-row class="mt-1">
-                      <v-col cols="12" md="6">
-                        <v-checkbox
-                          v-model="form.immich_auto_sync_enabled"
-                          label="Auto Sync Album"
-                          color="primary"
-                          density="compact"
-                          hide-details
-                          @update:model-value="saveSettingsInternal()"
-                        ></v-checkbox>
-                      </v-col>
-                      <v-col cols="12" md="6">
-                        <v-select
-                          v-model="form.immich_auto_sync_interval_minutes"
-                          :items="autoSyncIntervalOptions"
-                          item-title="title"
-                          item-value="value"
-                          label="Auto Sync Interval"
-                          variant="outlined"
-                          density="compact"
-                          :disabled="!form.immich_auto_sync_enabled"
-                          hint="How often to refresh photos from the selected album"
-                          persistent-hint
-                          @update:model-value="saveSettingsInternal()"
-                        ></v-select>
-                      </v-col>
-                    </v-row>
-
-                    <div class="d-flex flex-wrap ga-2 mt-4">
-                      <v-btn
-                        color="primary"
-                        :loading="immichStore.loading"
-                        @click="syncImmich"
-                        >Sync Now</v-btn
-                      >
-                      <v-btn color="warning" @click="clearImmich"
-                        >Clear All Photos</v-btn
-                      >
-                      <v-btn
-                        color="error"
-                        variant="text"
-                        @click="disconnectImmich"
-                        >Disconnect</v-btn
-                      >
-                    </div>
-                  </div>
-
-                  <div v-else>
-                    <v-text-field
-                      v-model="form.immich_url"
-                      label="Immich Server URL"
-                      placeholder="http://192.168.1.10:2283"
-                      variant="outlined"
-                      class="mb-2"
-                    ></v-text-field>
-
-                    <v-text-field
-                      v-model="form.immich_api_key"
-                      label="API Key"
-                      type="password"
-                      variant="outlined"
-                      class="mb-4"
-                    ></v-text-field>
-
-                    <v-btn
-                      color="primary"
-                      :disabled="!form.immich_url || !form.immich_api_key"
-                      :loading="immichStore.loading"
-                      @click="testImmich"
-                    >
-                      Connect
-                    </v-btn>
-                  </div>
-                </v-card-text>
-              </v-window-item>
-
-              <!-- Gallery -->
-              <v-window-item value="gallery">
-                <v-card-text>
-                  <v-alert
-                    type="info"
-                    variant="tonal"
-                    class="mb-4"
-                    density="compact"
-                  >
-                    Photos in the gallery live on this server. Add them from the
-                    Gallery tab above, or send them to the Telegram bot
-                    configured below.
-                  </v-alert>
-
-                  <v-text-field
-                    :model-value="getImageUrl('gallery')"
-                    label="Image Endpoint URL (for firmware config)"
-                    readonly
-                    variant="outlined"
-                    density="compact"
-                    append-inner-icon="mdi-content-copy"
-                    @click:append-inner="
-                      copyToClipboard(getImageUrl('gallery'))
-                    "
-                  ></v-text-field>
-
-                  <v-divider class="my-4"></v-divider>
-
-                  <h3 class="text-subtitle-1 font-weight-bold mb-1">
-                    Telegram Bot (Upload)
-                  </h3>
-                  <div class="text-caption text-grey mb-3">
-                    Optional. Configure a Telegram bot to upload photos into the
-                    gallery from your phone.
-                  </div>
-
-                  <div v-if="form.telegram_bot_token">
-                    <v-alert
-                      type="success"
-                      variant="tonal"
-                      class="mb-4"
-                      density="compact"
-                      icon="mdi-check-circle"
-                    >
-                      Telegram Bot Configured
-                    </v-alert>
-
-                    <v-text-field
-                      v-model="form.telegram_bot_token"
-                      label="Telegram Bot Token"
-                      variant="outlined"
-                    ></v-text-field>
-
-                    <v-divider class="my-4"></v-divider>
-
-                    <h3 class="text-subtitle-1 font-weight-bold mb-2">
-                      Push to Device
-                    </h3>
-                    <div class="text-caption text-grey mb-2">
-                      When enabled, photos uploaded via the Telegram bot are
-                      also pushed to the selected devices immediately. They are
-                      added to the gallery either way.
-                    </div>
-
-                    <v-checkbox
-                      v-model="form.telegram_push_enabled"
-                      label="Enable Push to Device"
-                      color="primary"
-                      hide-details
-                      density="compact"
-                    ></v-checkbox>
-
-                    <v-expand-transition>
-                      <div v-if="form.telegram_push_enabled" class="mt-2">
-                        <v-select
-                          v-model="form.telegram_target_device_id"
-                          :items="availableDevices"
-                          item-title="name"
-                          item-value="id"
-                          label="Target Devices"
-                          variant="outlined"
-                          density="compact"
-                          hint="Select the devices to display photos on"
-                          persistent-hint
-                          multiple
-                          chips
-                          closable-chips
-                        ></v-select>
-                      </div>
-                    </v-expand-transition>
-
-                    <v-btn color="primary" class="mt-4" @click="save"
-                      >Update Settings</v-btn
-                    >
-                  </div>
-
-                  <div v-else>
-                    <v-text-field
-                      v-model="form.telegram_bot_token"
-                      label="Telegram Bot Token"
-                      placeholder="Enter Bot Token"
-                      variant="outlined"
-                      hint="Send photos to your bot to add them to the gallery."
-                      persistent-hint
-                    ></v-text-field>
-
-                    <v-btn color="primary" class="mt-4" @click="save"
-                      >Save Token</v-btn
-                    >
-                  </div>
-                </v-card-text>
-              </v-window-item>
-
-              <!-- AI Generation -->
-              <v-window-item value="ai_generation">
-                <v-card-text>
-                  <v-alert
-                    type="info"
-                    variant="tonal"
-                    class="mb-4"
-                    density="compact"
-                  >
-                    Generate images using AI (OpenAI or Google Gemini).
-                    Configure API keys below, then set the prompt/model
-                    per-device in the Edit Device dialog.
-                  </v-alert>
-
-                  <v-text-field
-                    :model-value="getImageUrl('ai_generation')"
-                    label="Image Endpoint URL (for firmware config)"
-                    readonly
-                    variant="outlined"
-                    density="compact"
-                    append-inner-icon="mdi-content-copy"
-                    @click:append-inner="
-                      copyToClipboard(getImageUrl('ai_generation'))
-                    "
-                    class="mb-4"
-                  ></v-text-field>
-
-                  <v-text-field
-                    v-model="form.openai_api_key"
-                    label="OpenAI API Key"
-                    type="password"
-                    variant="outlined"
-                    class="mb-1"
-                    hint="sk-..."
-                    persistent-hint
-                  ></v-text-field>
-                  <div class="text-caption text-grey ml-2 mb-4">
-                    Get your API key at
-                    <a
-                      href="https://platform.openai.com/api-keys"
-                      target="_blank"
-                      class="text-primary text-decoration-none"
-                      >platform.openai.com</a
-                    >
-                  </div>
-
-                  <v-text-field
-                    v-model="form.google_api_key"
-                    label="Google Gemini API Key"
-                    type="password"
-                    variant="outlined"
-                    class="mb-1"
-                    persistent-hint
-                  ></v-text-field>
-                  <div class="text-caption text-grey ml-2 mb-4">
-                    Get your API key at
-                    <a
-                      href="https://aistudio.google.com/app/apikey"
-                      target="_blank"
-                      class="text-primary text-decoration-none"
-                      >aistudio.google.com</a
-                    >
-                  </div>
-
-                  <v-btn color="primary" @click="save">Save API Keys</v-btn>
-                </v-card-text>
-              </v-window-item>
-            </v-window>
-          </v-window-item>
-
-          <!-- Security Tab -->
+        <v-window v-model="activeMainTab" :touch="false">
+          <!-- System Tab (server + security) -->
           <v-window-item value="security">
             <v-card-text>
-              <div class="d-flex justify-space-between align-center mb-4">
-                <h3 class="text-h6">Admin Account</h3>
-                <v-btn
-                  variant="tonal"
-                  size="small"
-                  @click="showAccountForm = !showAccountForm"
-                >
-                  {{ showAccountForm ? 'Cancel' : 'Edit Account' }}
-                </v-btn>
-              </div>
+              <h3 class="text-h6 mb-3">Server</h3>
+              <v-text-field
+                v-model="form.device_image_base_url"
+                label="Server URL for devices"
+                :placeholder="derivedServerBase"
+                persistent-placeholder
+                hint="Base address your photo frames use to reach this server. Leave empty to derive it from your browser's address. Set this for Tailscale, reverse proxies, or custom domains."
+                persistent-hint
+                variant="outlined"
+                density="compact"
+                clearable
+                @update:model-value="saveSettingsInternal()"
+              ></v-text-field>
 
-              <v-expand-transition>
-                <v-card v-if="showAccountForm" variant="outlined" class="mb-6">
-                  <v-card-text>
-                    <v-alert
-                      type="info"
-                      variant="tonal"
-                      class="mb-4"
-                      density="compact"
-                    >
-                      Leave new password fields blank if you only want to change
-                      the username. Current password is required for any change.
-                    </v-alert>
-                    <v-text-field
-                      v-model="accountForm.newUsername"
-                      label="New Username (Optional)"
-                      placeholder="Leave empty to keep current"
-                      variant="outlined"
-                      density="compact"
-                      class="mb-2"
-                    ></v-text-field>
+              <v-divider class="my-6"></v-divider>
 
-                    <v-divider class="my-4"></v-divider>
-
-                    <v-text-field
-                      v-model="accountForm.newPassword"
-                      label="New Password"
-                      type="password"
-                      variant="outlined"
-                      density="compact"
-                      class="mb-2"
-                    ></v-text-field>
-                    <v-text-field
-                      v-model="accountForm.confirmPassword"
-                      label="Confirm New Password"
-                      type="password"
-                      variant="outlined"
-                      density="compact"
-                      class="mb-4"
-                    ></v-text-field>
-
-                    <v-divider class="my-4"></v-divider>
-
-                    <v-text-field
-                      v-model="accountForm.oldPassword"
-                      label="Current Password (Required)"
-                      type="password"
-                      variant="outlined"
-                      density="compact"
-                      class="mb-4"
-                    ></v-text-field>
-                    <v-btn color="primary" @click="updateAccountSettings"
-                      >Update Account</v-btn
-                    >
-                  </v-card-text>
-                </v-card>
-              </v-expand-transition>
-
-              <v-divider class="mb-6"></v-divider>
-
-              <h3 class="text-h6 mb-4">Active Sessions</h3>
-              <v-list density="compact" class="bg-grey-lighten-4 rounded mb-6">
-                <v-list-item
-                  v-for="session in sessions"
-                  :key="session.id"
-                  :title="getDeviceFromUA(session.user_agent)"
-                  :subtitle="`${session.ip} - Expires: ${new Date(session.expires_at).toLocaleDateString()}`"
-                >
-                  <template v-slot:append>
-                    <div class="d-flex align-center">
-                      <v-btn
-                        icon="mdi-delete"
-                        variant="text"
-                        color="error"
-                        size="small"
-                        @click="revokeSessionHandler(session.id)"
-                      ></v-btn>
-                    </div>
-                  </template>
-                </v-list-item>
-                <v-list-item v-if="sessions.length === 0">
-                  <v-list-item-title class="text-grey text-center"
-                    >No active sessions found</v-list-item-title
-                  >
-                </v-list-item>
-              </v-list>
-
-              <v-divider class="mb-6"></v-divider>
-
-              <h3 class="text-h6 mb-4">Device Access Tokens</h3>
-
-              <v-alert
-                v-if="generatedToken"
-                type="success"
-                variant="tonal"
-                class="mb-4"
-                closable
-                @click:close="generatedToken = ''"
-              >
-                <div class="font-weight-bold mb-1">Token Generated!</div>
-                <div class="text-caption mb-2">
-                  Copy this token securely. It will not be shown again.
-                </div>
-                <v-text-field
-                  :model-value="generatedToken"
-                  readonly
-                  variant="outlined"
-                  density="compact"
-                  hide-details
-                  bg-color="white"
-                  append-inner-icon="mdi-content-copy"
-                  @click:append-inner="copyToken"
-                ></v-text-field>
-              </v-alert>
-
-              <v-card variant="outlined" class="mb-6">
-                <v-card-title class="text-subtitle-1"
-                  >Generate New Token</v-card-title
-                >
-                <v-card-text>
-                  <div class="d-flex ga-2 align-center">
-                    <v-text-field
-                      v-model="newTokenName"
-                      label="Token Name (e.g. Living Room Frame)"
-                      variant="outlined"
-                      density="compact"
-                      hide-details
-                      class="flex-grow-1"
-                    ></v-text-field>
-                    <v-select
-                      v-model="newTokenDeviceId"
-                      :items="[
-                        { title: 'None', value: null },
-                        ...availableDevices.map((d: any) => ({
-                          title: d.name,
-                          value: d.id,
-                        })),
-                      ]"
-                      label="Bind to Device"
-                      variant="outlined"
-                      density="compact"
-                      hide-details
-                      style="max-width: 220px"
-                    ></v-select>
-                    <v-btn color="primary" @click="generateToken"
-                      >Generate</v-btn
-                    >
-                  </div>
-                </v-card-text>
-              </v-card>
-
-              <h4 class="text-subtitle-2 mb-2">Active Tokens</h4>
-              <v-table density="comfortable" class="border rounded">
-                <thead>
-                  <tr>
-                    <th>Name</th>
-                    <th>Bound Device</th>
-                    <th>Created At</th>
-                    <th class="text-right">Action</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr v-for="token in authStore.tokens" :key="token.id">
-                    <td>{{ token.name }}</td>
-                    <td>
-                      <v-select
-                        :model-value="token.device_id"
-                        :items="[
-                          { title: 'None', value: null },
-                          ...availableDevices.map((d: any) => ({
-                            title: d.name,
-                            value: d.id,
-                          })),
-                        ]"
-                        variant="plain"
-                        density="compact"
-                        hide-details
-                        style="max-width: 180px; font-size: inherit"
-                        @update:model-value="
-                          (val: any) => updateTokenDevice(token.id, val)
-                        "
-                      ></v-select>
-                    </td>
-                    <td>{{ new Date(token.created_at).toLocaleString() }}</td>
-                    <td class="text-right">
-                      <v-btn
-                        color="error"
-                        variant="text"
-                        size="small"
-                        @click="revokeToken(token.id)"
-                      >
-                        Revoke
-                      </v-btn>
-                    </td>
-                  </tr>
-                  <tr v-if="authStore.tokens.length === 0">
-                    <td colspan="4" class="text-center text-grey py-4">
-                      No active tokens found. Create one above to connect a
-                      device.
-                    </td>
-                  </tr>
-                </tbody>
-              </v-table>
+              <SecurityTab :devices="availableDevices" />
             </v-card-text>
           </v-window-item>
           <!-- Devices Tab -->
           <v-window-item value="devices">
             <v-card-text>
-              <v-alert
-                type="info"
-                variant="tonal"
-                class="mb-4"
-                density="compact"
-              >
-                Manage your ESP32 PhotoFrame devices here. These devices will be
-                available for direct push from the Gallery.
-              </v-alert>
-
               <div class="d-flex justify-end mb-4">
                 <v-btn
                   color="primary"
@@ -1138,57 +989,214 @@
                 ></v-progress-circular>
               </div>
 
-              <v-table v-else density="comfortable" class="border rounded">
-                <thead>
-                  <tr>
-                    <th>Name</th>
-                    <th>Model</th>
-                    <th>Host</th>
-                    <th class="text-right">Action</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr v-for="device in availableDevices" :key="device.id">
-                    <td>{{ device.name }}</td>
-                    <td>
-                      {{
-                        device.board_name || `${device.width}x${device.height}`
-                      }}
-                    </td>
-                    <td>
-                      {{ device.host }}
-                    </td>
-                    <td class="text-right">
-                      <v-btn
-                        color="primary"
-                        variant="text"
-                        size="small"
-                        icon="mdi-pencil"
-                        title="Edit Device"
-                        @click="editDevice(device)"
-                      ></v-btn>
-                      <v-btn
-                        color="error"
-                        variant="text"
-                        size="small"
-                        icon="mdi-delete"
-                        title="Delete Device"
-                        @click="removeDevice(device.id)"
-                      ></v-btn>
-                    </td>
-                  </tr>
-                  <tr v-if="availableDevices.length === 0">
-                    <td colspan="4" class="text-center text-grey py-4">
-                      No devices added.
-                    </td>
-                  </tr>
-                </tbody>
-              </v-table>
+              <template v-else>
+                <!-- Table on tablet/desktop -->
+                <v-table
+                  v-if="!smAndDown"
+                  density="comfortable"
+                  class="border rounded"
+                >
+                  <thead>
+                    <tr>
+                      <th>Name</th>
+                      <th>Model</th>
+                      <th>Version</th>
+                      <th>Battery</th>
+                      <th class="text-right">Action</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr v-for="device in availableDevices" :key="device.id">
+                      <td>
+                        {{ device.name }}
+                        <v-chip
+                          v-if="device.auth_required"
+                          size="x-small"
+                          color="warning"
+                          variant="flat"
+                          class="ml-2"
+                          prepend-icon="mdi-lock-alert"
+                          title="The frame refuses the server's password. Click to enter it."
+                          @click="promptFramePassword(device)"
+                        >
+                          Password required
+                        </v-chip>
+                      </td>
+                      <td>
+                        {{
+                          device.board_name ||
+                          `${device.width}x${device.height}`
+                        }}
+                        <v-chip
+                          v-if="device.display_type?.startsWith('gc')"
+                          size="x-small"
+                          class="ml-2"
+                        >
+                          Grayscale
+                        </v-chip>
+                      </td>
+                      <td>
+                        <span v-if="device.firmware_version">
+                          {{ device.firmware_version }}
+                        </span>
+                        <span v-else class="text-medium-emphasis">&mdash;</span>
+                      </td>
+                      <td>
+                        <span
+                          v-if="(device.battery_level ?? -1) >= 0"
+                          :title="
+                            'Last reported ' +
+                            formatReportedAt(device.battery_reported_at)
+                          "
+                        >
+                          <v-icon
+                            size="small"
+                            :color="
+                              device.battery_level! <= 20 ? 'error' : undefined
+                            "
+                            :icon="batteryIcon(device.battery_level!)"
+                          ></v-icon>
+                          {{ device.battery_level }}%
+                        </span>
+                        <span v-else class="text-medium-emphasis">&mdash;</span>
+                      </td>
+                      <td class="text-right">
+                        <v-btn
+                          color="primary"
+                          variant="text"
+                          size="small"
+                          icon="mdi-open-in-new"
+                          title="Open Device"
+                          :href="deviceURL(device)"
+                          target="_blank"
+                        ></v-btn>
+                        <v-btn
+                          color="primary"
+                          variant="text"
+                          size="small"
+                          icon="mdi-pencil"
+                          title="Edit Device"
+                          @click="editDevice(device)"
+                        ></v-btn>
+                        <v-btn
+                          color="error"
+                          variant="text"
+                          size="small"
+                          icon="mdi-delete"
+                          title="Delete Device"
+                          @click="removeDevice(device.id)"
+                        ></v-btn>
+                      </td>
+                    </tr>
+                    <tr v-if="availableDevices.length === 0">
+                      <td colspan="5" class="text-center text-grey py-4">
+                        No devices added.
+                      </td>
+                    </tr>
+                  </tbody>
+                </v-table>
+
+                <!-- Stacked list on phones (no horizontal scroll) -->
+                <v-list
+                  v-else-if="availableDevices.length"
+                  class="border rounded"
+                  density="comfortable"
+                >
+                  <template
+                    v-for="(device, i) in availableDevices"
+                    :key="device.id"
+                  >
+                    <v-divider v-if="i > 0"></v-divider>
+                    <v-list-item>
+                      <v-list-item-title class="text-truncate">
+                        {{ device.name }}
+                      </v-list-item-title>
+                      <v-list-item-subtitle class="text-truncate">
+                        {{
+                          device.board_name ||
+                          `${device.width}x${device.height}`
+                        }}
+                        <v-chip
+                          v-if="device.display_type?.startsWith('gc')"
+                          size="x-small"
+                          class="ml-2"
+                        >
+                          Grayscale
+                        </v-chip>
+                      </v-list-item-subtitle>
+                      <v-list-item-subtitle v-if="device.auth_required">
+                        <v-chip
+                          size="x-small"
+                          color="warning"
+                          variant="flat"
+                          prepend-icon="mdi-lock-alert"
+                          @click="promptFramePassword(device)"
+                        >
+                          Password required
+                        </v-chip>
+                      </v-list-item-subtitle>
+                      <v-list-item-subtitle
+                        v-if="device.firmware_version"
+                        class="text-truncate"
+                      >
+                        {{ device.firmware_version }}
+                      </v-list-item-subtitle>
+                      <v-list-item-subtitle
+                        v-if="(device.battery_level ?? -1) >= 0"
+                        :title="
+                          'Last reported ' +
+                          formatReportedAt(device.battery_reported_at)
+                        "
+                      >
+                        <v-icon
+                          size="x-small"
+                          :color="
+                            device.battery_level! <= 20 ? 'error' : undefined
+                          "
+                          :icon="batteryIcon(device.battery_level!)"
+                        ></v-icon>
+                        {{ device.battery_level }}%
+                      </v-list-item-subtitle>
+                      <template #append>
+                        <v-btn
+                          color="primary"
+                          variant="text"
+                          size="small"
+                          icon="mdi-open-in-new"
+                          title="Open Device"
+                          :href="deviceURL(device)"
+                          target="_blank"
+                        ></v-btn>
+                        <v-btn
+                          color="primary"
+                          variant="text"
+                          size="small"
+                          icon="mdi-pencil"
+                          title="Edit Device"
+                          @click="editDevice(device)"
+                        ></v-btn>
+                        <v-btn
+                          color="error"
+                          variant="text"
+                          size="small"
+                          icon="mdi-delete"
+                          title="Delete Device"
+                          @click="removeDevice(device.id)"
+                        ></v-btn>
+                      </template>
+                    </v-list-item>
+                  </template>
+                </v-list>
+                <div v-else class="text-center text-grey py-4">
+                  No devices added.
+                </div>
+              </template>
 
               <!-- Edit Device Dialog (tabbed like device webapp) -->
               <v-dialog
                 v-model="showEditDeviceDialog"
                 max-width="1100px"
+                :fullscreen="smAndDown"
                 scrollable
               >
                 <v-card>
@@ -1201,6 +1209,7 @@
                     v-if="!isAddingDevice"
                     v-model="deviceDialogTab"
                     density="compact"
+                    show-arrows
                   >
                     <v-tab value="general">General</v-tab>
                     <v-tab value="autoRotate">Auto Rotate</v-tab>
@@ -1208,14 +1217,43 @@
                     <v-tab value="homeAssistant">Home Assistant</v-tab>
                     <v-tab value="processing">Processing</v-tab>
                     <v-tab value="ai">AI Generation</v-tab>
-                    <v-tab value="palette">Palette</v-tab>
+                    <v-tab v-if="!isGrayscale" value="palette">Palette</v-tab>
+                    <v-tab v-if="isGrayscale" value="grayscale"
+                      >Grayscale</v-tab
+                    >
                   </v-tabs>
                   <v-card-text
                     :style="
-                      isAddingDevice ? '' : 'height: 455px; overflow-y: auto'
+                      isAddingDevice || smAndDown
+                        ? ''
+                        : 'height: 455px; overflow-y: auto'
                     "
                   >
-                    <!-- Add Device: just host input -->
+                    <!-- The frame refuses the server: say so up front, since
+                         nothing saved here reaches it until its password is
+                         entered (the field is under Advanced network settings). -->
+                    <v-alert
+                      v-if="!isAddingDevice && editingDevice.auth_required"
+                      type="warning"
+                      variant="tonal"
+                      density="compact"
+                      class="mb-3"
+                    >
+                      <div class="d-flex flex-wrap align-center ga-2">
+                        <span
+                          >This frame refuses the password the server has for
+                          it, so settings saved here reach it only with its next
+                          image fetch.</span
+                        >
+                        <v-btn
+                          size="small"
+                          variant="tonal"
+                          @click="promptForEditingDevice"
+                          >Enter password</v-btn
+                        >
+                      </div>
+                    </v-alert>
+                    <!-- Add Device: host, plus a password if the frame needs one -->
                     <div v-if="isAddingDevice" class="mt-2">
                       <v-text-field
                         v-model="editingDevice.host"
@@ -1225,12 +1263,32 @@
                         persistent-hint
                         autofocus
                       ></v-text-field>
+                      <v-checkbox
+                        v-model="deviceNeedsPassword"
+                        label="This frame requires a password"
+                        color="primary"
+                        density="compact"
+                        class="mt-2"
+                        hide-details
+                      ></v-checkbox>
+                      <v-text-field
+                        v-if="deviceNeedsPassword"
+                        v-model="deviceHttpPassword"
+                        label="Frame password"
+                        type="password"
+                        maxlength="63"
+                        variant="outlined"
+                        hint="Set on the frame's own web interface. Without it the frame cannot be read, and placeholder settings are used until you supply it."
+                        persistent-hint
+                        class="mt-2"
+                      ></v-text-field>
                     </div>
 
                     <!-- Edit Device: full tabbed UI -->
                     <v-tabs-window
                       v-if="!isAddingDevice"
                       v-model="deviceDialogTab"
+                      :touch="false"
                     >
                       <!-- General Tab -->
                       <v-tabs-window-item value="general">
@@ -1281,34 +1339,335 @@
                             ></v-select>
                           </v-col>
                         </v-row>
+                        <!-- Time zone (#128). The frame stores a POSIX TZ
+                             rule and applies it with tzset(), so a zone
+                             with DST works; the picker names the rule,
+                             the advanced field takes any rule verbatim. -->
                         <v-row>
                           <v-col cols="12" md="6">
-                            <v-text-field
-                              v-model.number="deviceConfig.timezone_offset"
-                              label="Timezone (UTC offset)"
-                              type="number"
-                              :min="-12"
-                              :max="14"
-                              :step="0.5"
+                            <v-autocomplete
+                              v-model="tzZone"
+                              :items="tzItems"
+                              label="Time zone"
                               variant="outlined"
                               density="compact"
-                              hint="e.g., -8 for PST, +1 for CET, +8 for CST"
+                              auto-select-first
+                              :hint="tzHint"
                               persistent-hint
-                            ></v-text-field>
+                              @focusin="selectTzSearch"
+                            ></v-autocomplete>
+                            <div
+                              v-if="tzCaveat !== null"
+                              class="text-caption text-warning mt-1"
+                            >
+                              {{ tzCaveat }}
+                            </div>
+                          </v-col>
+                          <v-col
+                            cols="12"
+                            md="6"
+                            class="d-flex flex-wrap align-center ga-2"
+                          >
+                            <v-btn
+                              size="small"
+                              variant="tonal"
+                              :disabled="
+                                browserZoneRule === null ||
+                                deviceConfig.timezone === browserZoneRule
+                              "
+                              @click="useBrowserZone"
+                            >
+                              Use this browser's time zone
+                            </v-btn>
+                            <span
+                              v-if="browserZone !== null"
+                              class="text-caption text-medium-emphasis"
+                            >
+                              {{ browserZone
+                              }}{{
+                                browserZoneRule === null
+                                  ? ' is not in the list'
+                                  : ''
+                              }}
+                            </span>
                           </v-col>
                         </v-row>
                         <v-row>
                           <v-col cols="12" md="6">
+                            <v-checkbox
+                              v-model="tzRuleShown"
+                              label="Advanced: POSIX TZ rule"
+                              density="compact"
+                              hide-details
+                              :disabled="tzChoice.kind !== 'zone'"
+                            ></v-checkbox>
                             <v-text-field
-                              v-model="deviceConfig.ntp_server"
-                              label="NTP Server"
+                              v-if="tzRuleShown"
+                              v-model="deviceConfig.timezone"
+                              label="POSIX TZ rule"
                               variant="outlined"
                               density="compact"
-                              hint="e.g., pool.ntp.org"
+                              spellcheck="false"
+                              autocapitalize="off"
+                              :error-messages="tzProblem ? [tzProblem] : []"
+                              hint="Any rule the frame's tzset() takes, e.g. EST5EDT,M3.2.0,M11.1.0. Fixed offsets count hours west: UTC-8 is UTC+8."
                               persistent-hint
                             ></v-text-field>
                           </v-col>
                         </v-row>
+                        <!-- Advanced network settings (#43), collapsed by
+                             default. Static IP / DNS render only when the
+                             firmware reports ip_mode; NTP exists everywhere. -->
+                        <v-expansion-panels class="mt-2" variant="accordion">
+                          <v-expansion-panel
+                            title="Advanced network settings"
+                            elevation="0"
+                          >
+                            <v-expansion-panel-text>
+                              <v-row>
+                                <v-col cols="12" md="6">
+                                  <v-text-field
+                                    v-model="deviceConfig.ntp_server"
+                                    label="NTP Server"
+                                    variant="outlined"
+                                    density="compact"
+                                    hint="e.g., pool.ntp.org, or a local IP"
+                                    persistent-hint
+                                  ></v-text-field>
+                                </v-col>
+                                <v-col
+                                  v-if="deviceSupportsStaticIp"
+                                  cols="12"
+                                  md="6"
+                                >
+                                  <v-select
+                                    v-model="deviceConfig.ip_mode"
+                                    :items="[
+                                      {
+                                        title: 'Automatic (DHCP)',
+                                        value: 'dhcp',
+                                      },
+                                      { title: 'Static IP', value: 'static' },
+                                    ]"
+                                    label="IP Configuration"
+                                    variant="outlined"
+                                    density="compact"
+                                    hint="Applied on the device's next boot / wake"
+                                    persistent-hint
+                                  ></v-select>
+                                </v-col>
+                              </v-row>
+                              <v-row
+                                v-if="
+                                  deviceSupportsStaticIp &&
+                                  deviceConfig.ip_mode === 'static'
+                                "
+                              >
+                                <v-col cols="12" md="4">
+                                  <v-text-field
+                                    v-model="deviceConfig.static_ip"
+                                    label="IP Address"
+                                    variant="outlined"
+                                    density="compact"
+                                    placeholder="192.168.1.50"
+                                  ></v-text-field>
+                                </v-col>
+                                <v-col cols="12" md="4">
+                                  <v-text-field
+                                    v-model="deviceConfig.static_netmask"
+                                    label="Netmask"
+                                    variant="outlined"
+                                    density="compact"
+                                  ></v-text-field>
+                                </v-col>
+                                <v-col cols="12" md="4">
+                                  <v-text-field
+                                    v-model="deviceConfig.static_gateway"
+                                    label="Gateway"
+                                    variant="outlined"
+                                    density="compact"
+                                    placeholder="192.168.1.1"
+                                  ></v-text-field>
+                                </v-col>
+                              </v-row>
+                              <v-row v-if="deviceSupportsStaticIp">
+                                <v-col cols="12" md="6">
+                                  <v-text-field
+                                    v-model="deviceConfig.dns_server"
+                                    label="DNS Server"
+                                    variant="outlined"
+                                    density="compact"
+                                    :hint="
+                                      deviceConfig.ip_mode === 'static'
+                                        ? 'Leave empty to use the gateway'
+                                        : 'Optional override; leave empty for DHCP-provided DNS'
+                                    "
+                                    persistent-hint
+                                  ></v-text-field>
+                                </v-col>
+                              </v-row>
+                              <!-- Frame password (#130), where the frame's own web
+                                   interface keeps it. Two different things: the
+                                   field records the password the frame already
+                                   has; the card below changes the frame itself. -->
+                              <div class="text-subtitle-2 mt-6">
+                                Frame password
+                              </div>
+                              <v-row>
+                                <v-col cols="12" md="6">
+                                  <v-text-field
+                                    v-model="deviceHttpPassword"
+                                    :label="
+                                      editingDevice.http_password_set
+                                        ? 'Frame password (set — blank keeps it)'
+                                        : 'Frame password (only if enabled on the frame)'
+                                    "
+                                    type="password"
+                                    maxlength="63"
+                                    variant="outlined"
+                                    density="compact"
+                                    hint="The password the frame already has, so this server can reach it. Saving it here does not change the frame."
+                                    persistent-hint
+                                  ></v-text-field>
+                                  <v-btn
+                                    v-if="editingDevice.http_password_set"
+                                    size="small"
+                                    variant="text"
+                                    color="error"
+                                    class="mt-1"
+                                    :disabled="framePasswordBusy"
+                                    @click="clearDeviceHttpPassword"
+                                    >Forget password</v-btn
+                                  >
+                                </v-col>
+                              </v-row>
+                              <!-- Changes the frame itself, unlike the field above,
+                                   which only tells this server what the frame has. -->
+                              <v-row>
+                                <v-col cols="12">
+                                  <v-card variant="outlined" class="pa-3">
+                                    <div class="text-subtitle-2">
+                                      Password on the frame
+                                    </div>
+                                    <div
+                                      class="text-body-2 text-medium-emphasis"
+                                    >
+                                      {{
+                                        editingDevice.http_password_set
+                                          ? 'Changes the password the frame itself requires.'
+                                          : 'Makes the frame itself require a password.'
+                                      }}
+                                      The server signs in to the frame with the
+                                      password it has stored, sets the new one
+                                      on the frame, then stores that too. If the
+                                      frame does not accept it, nothing changes.
+                                    </div>
+                                    <div
+                                      v-if="framePasswordHostUnsaved"
+                                      class="text-caption text-warning mt-2"
+                                    >
+                                      Save the new Host / IP first: this acts on
+                                      the frame at the saved address.
+                                    </div>
+                                    <div
+                                      v-if="framePasswordTypedUnsaved"
+                                      class="text-caption text-warning mt-2"
+                                    >
+                                      Save the password typed above first: the
+                                      server signs in to the frame with the
+                                      saved one.
+                                    </div>
+                                    <div
+                                      v-if="!framePasswordFormOpen"
+                                      class="d-flex flex-wrap ga-2 mt-2"
+                                    >
+                                      <v-btn
+                                        size="small"
+                                        variant="tonal"
+                                        :disabled="
+                                          framePasswordBusy ||
+                                          !framePasswordReady
+                                        "
+                                        @click="openFramePasswordForm"
+                                        >{{
+                                          editingDevice.http_password_set
+                                            ? 'Change password on the frame'
+                                            : 'Set a password on the frame'
+                                        }}</v-btn
+                                      >
+                                      <v-btn
+                                        v-if="editingDevice.http_password_set"
+                                        size="small"
+                                        variant="tonal"
+                                        color="error"
+                                        :loading="framePasswordBusy"
+                                        :disabled="!framePasswordReady"
+                                        @click="turnOffFramePassword"
+                                        >Turn off password on the frame</v-btn
+                                      >
+                                    </div>
+                                    <div v-else class="mt-2">
+                                      <v-row dense>
+                                        <v-col cols="12" md="6">
+                                          <v-text-field
+                                            v-model="newFramePassword"
+                                            label="New frame password"
+                                            type="password"
+                                            autocomplete="new-password"
+                                            variant="outlined"
+                                            density="compact"
+                                            hide-details="auto"
+                                          ></v-text-field>
+                                        </v-col>
+                                        <v-col cols="12" md="6">
+                                          <v-text-field
+                                            v-model="newFramePasswordRepeat"
+                                            label="Repeat new frame password"
+                                            type="password"
+                                            autocomplete="new-password"
+                                            variant="outlined"
+                                            density="compact"
+                                            hide-details="auto"
+                                            :error-messages="
+                                              framePasswordTouched
+                                                ? framePasswordProblem || []
+                                                : []
+                                            "
+                                          ></v-text-field>
+                                        </v-col>
+                                      </v-row>
+                                      <div class="d-flex flex-wrap ga-2 mt-2">
+                                        <v-btn
+                                          size="small"
+                                          color="primary"
+                                          :loading="framePasswordBusy"
+                                          :disabled="!framePasswordReady"
+                                          @click="applyFramePassword"
+                                          >Change on the frame</v-btn
+                                        >
+                                        <v-btn
+                                          size="small"
+                                          variant="text"
+                                          :disabled="framePasswordBusy"
+                                          @click="closeFramePasswordForm"
+                                          >Cancel</v-btn
+                                        >
+                                      </div>
+                                    </div>
+                                    <v-alert
+                                      v-if="framePasswordNote"
+                                      :type="framePasswordNote.type"
+                                      variant="tonal"
+                                      density="compact"
+                                      class="mt-3"
+                                      >{{ framePasswordNote.text }}</v-alert
+                                    >
+                                  </v-card>
+                                </v-col>
+                              </v-row>
+                            </v-expansion-panel-text>
+                          </v-expansion-panel>
+                        </v-expansion-panels>
                       </v-tabs-window-item>
 
                       <!-- Auto Rotate Tab -->
@@ -1321,22 +1680,13 @@
                           class="mt-2 mb-2"
                         />
                         <div class="ml-10">
-                          <v-select
-                            v-model="deviceConfig.rotate_interval"
-                            :items="rotateIntervalOptions"
-                            label="Rotation Interval"
-                            variant="outlined"
-                            density="compact"
-                            hide-details
-                            class="mb-2"
+                          <RotationSchedule
+                            v-model="deviceConfig.rotate_cron"
+                            :sleep="
+                              deviceSupportsCron ? null : sleepPreviewWindow
+                            "
                             :disabled="!deviceConfig.auto_rotate"
-                          />
-                          <v-checkbox
-                            v-model="deviceConfig.auto_rotate_aligned"
-                            label="Align rotation to clock boundaries"
-                            hide-details
-                            class="mb-2"
-                            :disabled="!deviceConfig.auto_rotate"
+                            :supports-cron="deviceSupportsCron"
                           />
                           <v-select
                             v-model="deviceConfig.rotation_mode"
@@ -1375,6 +1725,91 @@
                               :disabled="!deviceConfig.auto_rotate"
                             ></v-select>
 
+                            <!-- Per-frame album selection for the chosen source -->
+                            <div
+                              v-if="
+                                useThisServer &&
+                                selectedSource === 'immich' &&
+                                immichConnected
+                              "
+                              class="mb-2 ml-8"
+                            >
+                              <div class="text-caption text-grey mb-1">
+                                Albums for this frame — leave all unchecked to
+                                use every synced Immich photo.
+                              </div>
+                              <AlbumPicker
+                                v-model="deviceImmichAlbumIds"
+                                :albums="deviceImmichAlbumOptions"
+                                label-field="name"
+                                :max-height="220"
+                                :disabled="!deviceConfig.auto_rotate"
+                                empty-text="No synced Immich albums. Add some in Data Sources → Immich first."
+                              ></AlbumPicker>
+                            </div>
+
+                            <div
+                              v-if="
+                                useThisServer &&
+                                selectedSource === 'synology_photos' &&
+                                form.synology_sid
+                              "
+                              class="mb-2 ml-8"
+                            >
+                              <div class="text-caption text-grey mb-1">
+                                Albums for this frame — leave all unchecked to
+                                use every synced Synology photo.
+                              </div>
+                              <AlbumPicker
+                                v-model="deviceSynologyAlbumIds"
+                                :albums="deviceSynologyAlbumOptions"
+                                label-field="name"
+                                :max-height="220"
+                                :disabled="!deviceConfig.auto_rotate"
+                                empty-text="No synced Synology albums. Add some in Data Sources → Synology first."
+                              ></AlbumPicker>
+                            </div>
+
+                            <div
+                              v-if="
+                                useThisServer && selectedSource === 'unsplash'
+                              "
+                              class="mb-2 ml-8"
+                            >
+                              <div class="text-caption text-grey mb-1">
+                                Topics for this frame — leave all unchecked to
+                                use every synced Unsplash photo.
+                              </div>
+                              <AlbumPicker
+                                v-model="deviceUnsplashAlbumIds"
+                                :albums="deviceUnsplashAlbumOptions"
+                                label-field="name"
+                                :max-height="220"
+                                :disabled="!deviceConfig.auto_rotate"
+                                empty-text="No synced Unsplash topics. Add some in Data Sources → Unsplash first."
+                              ></AlbumPicker>
+                            </div>
+
+                            <div
+                              v-if="
+                                useThisServer && selectedSource === 'pexels'
+                              "
+                              class="mb-2 ml-8"
+                            >
+                              <div class="text-caption text-grey mb-1">
+                                Topics for this frame — leave all unchecked to
+                                use every synced Pexels photo.
+                              </div>
+                              <AlbumPicker
+                                v-model="devicePexelsAlbumIds"
+                                :albums="devicePexelsAlbumOptions"
+                                label-field="name"
+                                :max-height="220"
+                                :disabled="!deviceConfig.auto_rotate"
+                                empty-text="No synced Pexels topics. Add some in Data Sources → Pexels first."
+                              ></AlbumPicker>
+                            </div>
+
                             <!-- Custom URL -->
                             <v-text-field
                               v-if="!useThisServer"
@@ -1398,43 +1833,46 @@
                           </div>
                         </div>
 
-                        <v-divider class="my-3" />
-
-                        <!-- Sleep Schedule (device config) -->
-                        <v-switch
-                          v-model="deviceConfig.sleep_schedule_enabled"
-                          label="Enable Sleep Schedule"
-                          color="primary"
-                          hide-details
-                          class="mb-2"
-                        />
-                        <div
-                          v-if="deviceConfig.sleep_schedule_enabled"
-                          class="ml-10"
-                        >
-                          <v-row dense>
-                            <v-col cols="6">
-                              <v-text-field
-                                v-model="deviceConfig.sleep_start_time"
-                                label="From"
-                                type="time"
-                                variant="outlined"
-                                density="compact"
-                                hide-details
-                              />
-                            </v-col>
-                            <v-col cols="6">
-                              <v-text-field
-                                v-model="deviceConfig.sleep_end_time"
-                                label="To"
-                                type="time"
-                                variant="outlined"
-                                density="compact"
-                                hide-details
-                              />
-                            </v-col>
-                          </v-row>
-                        </div>
+                        <!-- Sleep Schedule: legacy quiet-hours, only for
+                             pre-cron firmware. Newer firmware expresses the
+                             active window in the cron rules instead. -->
+                        <template v-if="!deviceSupportsCron">
+                          <v-divider class="my-3" />
+                          <v-switch
+                            v-model="deviceConfig.sleep_schedule_enabled"
+                            label="Enable Sleep Schedule"
+                            color="primary"
+                            hide-details
+                            class="mb-2"
+                          />
+                          <div
+                            v-if="deviceConfig.sleep_schedule_enabled"
+                            class="ml-10"
+                          >
+                            <v-row dense>
+                              <v-col cols="12" sm="6">
+                                <v-text-field
+                                  v-model="deviceConfig.sleep_start_time"
+                                  label="From"
+                                  type="time"
+                                  variant="outlined"
+                                  density="compact"
+                                  hide-details
+                                />
+                              </v-col>
+                              <v-col cols="12" sm="6">
+                                <v-text-field
+                                  v-model="deviceConfig.sleep_end_time"
+                                  label="To"
+                                  type="time"
+                                  variant="outlined"
+                                  density="compact"
+                                  hide-details
+                                />
+                              </v-col>
+                            </v-row>
+                          </div>
+                        </template>
 
                         <v-divider class="my-4" />
 
@@ -1443,27 +1881,6 @@
                           Display Settings
                         </div>
                         <div class="ml-10">
-                          <v-row dense>
-                            <v-col cols="12" md="6">
-                              <v-select
-                                v-model="editingDevice.display_mode"
-                                :items="[
-                                  {
-                                    title: 'Cover (fill, may crop)',
-                                    value: 'cover',
-                                  },
-                                  {
-                                    title: 'Fit (show entire photo)',
-                                    value: 'fit',
-                                  },
-                                ]"
-                                label="Photo Display Mode"
-                                variant="outlined"
-                                density="compact"
-                                hide-details
-                              ></v-select>
-                            </v-col>
-                          </v-row>
                           <v-checkbox
                             v-model="editingDevice.enable_collage"
                             label="Enable Collage Mode"
@@ -1517,7 +1934,7 @@
                             dense
                             class="mt-3"
                           >
-                            <v-col cols="6">
+                            <v-col cols="12" sm="6">
                               <v-text-field
                                 v-model.number="editingDevice.weather_lat"
                                 label="Latitude"
@@ -1527,7 +1944,7 @@
                                 type="number"
                               ></v-text-field>
                             </v-col>
-                            <v-col cols="6">
+                            <v-col cols="12" sm="6">
                               <v-text-field
                                 v-model.number="editingDevice.weather_lon"
                                 label="Longitude"
@@ -1688,6 +2105,43 @@
                             </v-card>
                           </v-col>
                         </v-row>
+                        <!-- Layout first, matching the device web app -->
+                        <v-row>
+                          <v-col cols="12" md="4">
+                            <v-select
+                              v-model="deviceProcessing.scaleMode"
+                              :items="[
+                                {
+                                  title: 'Cover (fill, may crop)',
+                                  value: 'cover',
+                                },
+                                {
+                                  title: 'Fit (show entire photo)',
+                                  value: 'fit',
+                                },
+                              ]"
+                              label="Scale Mode"
+                              variant="outlined"
+                              density="compact"
+                            ></v-select>
+                          </v-col>
+                          <v-col
+                            v-if="deviceProcessing.scaleMode === 'fit'"
+                            cols="12"
+                            md="4"
+                          >
+                            <v-select
+                              v-model="deviceProcessing.backgroundColor"
+                              :items="[
+                                { title: 'White', value: 'white' },
+                                { title: 'Black', value: 'black' },
+                              ]"
+                              label="Background Color"
+                              variant="outlined"
+                              density="compact"
+                            ></v-select>
+                          </v-col>
+                        </v-row>
                         <v-row>
                           <v-col cols="12" md="4">
                             <v-select
@@ -1732,7 +2186,7 @@
                               </template>
                             </v-slider>
                           </v-col>
-                          <v-col cols="12" md="4">
+                          <v-col v-if="!isGrayscale" cols="12" md="4">
                             <v-slider
                               v-model="deviceProcessing.saturation"
                               :min="0.5"
@@ -2030,6 +2484,92 @@
                           >Reset to Defaults</v-btn
                         >
                       </v-tabs-window-item>
+
+                      <!-- Grayscale Calibration Tab (mirrors device webapp GrayscaleCalibration) -->
+                      <v-tabs-window-item value="grayscale">
+                        <v-alert
+                          type="info"
+                          variant="tonal"
+                          density="compact"
+                          class="mt-2 mb-4"
+                        >
+                          Calibrate the measured luminance of your grayscale
+                          (GC16) panel. These two values are the relative
+                          luminance (Y, 0&ndash;1) of full black and full white
+                          as displayed by your specific panel. They drive the
+                          grayscale dithering and dynamic-range compression.
+                        </v-alert>
+
+                        <p class="text-body-2 mb-4">
+                          Keeping <strong>black luminance at 0</strong> renders
+                          shadows as pure black for a punchier, higher-contrast
+                          result. Raising it toward your panel's real black
+                          makes the on-screen preview match what the panel
+                          actually shows (WYSIWYG). You can measure these by
+                          displaying a full-black image, then a full-white
+                          image, and metering the panel's luminance.
+                        </p>
+
+                        <v-row>
+                          <v-col cols="12" md="6">
+                            <v-text-field
+                              v-model.number="grayscaleCal.black_y"
+                              label="Black luminance (Y)"
+                              type="number"
+                              :min="0"
+                              :max="1"
+                              :step="0.001"
+                              variant="outlined"
+                              density="compact"
+                              hint="Measured relative luminance of full black (0–1). 0 keeps shadows pure black."
+                              persistent-hint
+                            />
+                          </v-col>
+                          <v-col cols="12" md="6">
+                            <v-text-field
+                              v-model.number="grayscaleCal.white_y"
+                              label="White luminance (Y)"
+                              type="number"
+                              :min="0"
+                              :max="1"
+                              :step="0.01"
+                              variant="outlined"
+                              density="compact"
+                              hint="Measured relative luminance of full white (0–1). Default 0.65."
+                              persistent-hint
+                            />
+                          </v-col>
+                          <v-col cols="12" md="6">
+                            <v-text-field
+                              v-model.number="grayscaleCal.gamma"
+                              label="Mid-tone gamma"
+                              type="number"
+                              :min="0.2"
+                              :max="4"
+                              :step="0.05"
+                              variant="outlined"
+                              density="compact"
+                              hint="Mid-level shaping; 1.0 = neutral, >1 darkens mid-tones. Default 1.42."
+                              persistent-hint
+                            />
+                          </v-col>
+                        </v-row>
+
+                        <v-btn
+                          variant="text"
+                          color="error"
+                          size="small"
+                          class="mt-2"
+                          @click="
+                            Object.assign(grayscaleCal, {
+                              black_y: 0.009,
+                              white_y: 0.65,
+                              gamma: 1.42,
+                            })
+                          "
+                          >Reset to Defaults</v-btn
+                        >
+                      </v-tabs-window-item>
                     </v-tabs-window>
                   </v-card-text>
                   <v-card-actions>
@@ -2055,6 +2595,7 @@
                       color="primary"
                       @click="saveDevice"
                       :loading="savingDeviceConfig"
+                      :disabled="framePasswordBusy"
                       >{{ isAddingDevice ? 'Add' : 'Save' }}</v-btn
                     >
                   </v-card-actions>
@@ -2065,37 +2606,31 @@
         </v-window>
       </div>
 
-      <!-- Global Snackbar for Messages -->
-      <v-snackbar
-        v-model="snackbar.show"
-        :color="snackbar.color"
-        :timeout="3000"
-        location="bottom right"
-      >
-        {{ snackbar.message }}
-        <template v-slot:actions>
-          <v-btn variant="text" @click="snackbar.show = false">Close</v-btn>
-        </template>
-      </v-snackbar>
-
       <ConfirmDialog ref="confirmDialog" />
     </v-card>
   </div>
 </template>
 
 <script setup lang="ts">
-import { onMounted, reactive, ref, computed, watch } from 'vue';
+import { onMounted, nextTick, reactive, ref, computed, watch } from 'vue';
+import { useDisplay } from 'vuetify';
 import { useSettingsStore } from '../stores/settings';
 import { useSynologyStore } from '../stores/synology';
 import { useImmichStore } from '../stores/immich';
-import { useAuthStore } from '../stores/auth';
+import { useUnsplashStore, usePexelsStore } from '../stores/createSourceStore';
 import { useGalleryStore } from '../stores/gallery';
+import { useAuthStore } from '../stores/auth';
+import { useSnackbar } from '../composables/useSnackbar';
+import { useFramePasswordPrompt } from '../composables/useFramePasswordPrompt';
+import { isFrameAuthRefusal } from '../utils/frameAuth';
 import {
   api,
   listDevices,
   addDevice,
   deleteDevice,
   updateDevice,
+  setDeviceHttpPassword,
+  changeFramePassword,
   refreshDevice,
   type Device,
   createURLSource,
@@ -2104,35 +2639,334 @@ import {
   deleteURLSource,
   getDeviceConfig,
   updateDeviceConfig,
-  updateAccount,
-  listSessions,
-  revokeSession,
   listCalendars,
   googleCalendarLogin,
   googleCalendarLogout,
 } from '../api';
 import Gallery from './Gallery.vue';
 import ConfirmDialog from './ConfirmDialog.vue';
+import { newFramePasswordProblem } from '../utils/framePassword';
+import { getApiError } from '../utils/errors';
+import AlbumPicker from './AlbumPicker.vue';
+import TopicManager from './TopicManager.vue';
+import SecurityTab from './SecurityTab.vue';
+import RotationSchedule from './RotationSchedule.vue';
+import { intervalToCron, cronToInterval, isValidCron } from '../utils/cron';
+import {
+  DEFAULT_TZ_RULE,
+  TIMEZONE_NAMES,
+  browserTimeZone,
+  choiceForRule,
+  ruleForZone,
+  tzRuleProblem,
+  zoneCaveat,
+} from '../utils/timezone';
 
+const { smAndDown } = useDisplay(); // true on phones / small tablets
 const store = useSettingsStore();
 const synologyStore = useSynologyStore();
 const immichStore = useImmichStore();
+const unsplashStore = useUnsplashStore();
+const pexelsStore = usePexelsStore();
 const immichConnected = ref(false);
-const authStore = useAuthStore();
+const unsplashConnected = ref(false);
+const pexelsConnected = ref(false);
+
+// Topic-source store lookup by source key (unsplash/pexels).
+const topicStores: Record<string, any> = {
+  unsplash: unsplashStore,
+  pexels: pexelsStore,
+};
+
+// Immich "albums to sync" selection (Part A)
+const syncAlbumIds = ref<string[]>([]);
+const syncFavorites = ref(false);
+const syncAll = ref(false);
+const syncMemories = ref(false);
+const savingSyncSelection = ref(false);
+
+// Synology "albums to sync" selection (mirror of Immich, no virtual modes)
+const synologySyncAlbumIds = ref<string[]>([]);
+const savingSynologySyncSelection = ref(false);
+
+// Album selection auto-saves (debounced) but does NOT trigger an import — the
+// user syncs manually or is prompted on leaving. Suppress the auto-save while
+// applying persisted state programmatically (load / post-save refresh).
+// *SyncDirty marks selection changed since the last actual sync.
+let suppressSyncAutoSave = false;
+let immichSyncSaveTimer: number | null = null;
+let synologySyncSaveTimer: number | null = null;
+const immichSyncDirty = ref(false);
+const synologySyncDirty = ref(false);
+// Topic sources (Unsplash/Pexels): topics auto-save on add/remove but do not
+// import until the user syncs or is prompted on leaving the source.
+const topicSyncDirty = reactive<Record<string, boolean>>({
+  unsplash: false,
+  pexels: false,
+});
+
+// Per-device Immich album bindings (Part B)
+const deviceImmichAlbumIds = ref<number[]>([]);
+// Per-device Synology album bindings (Part C)
+const deviceSynologyAlbumIds = ref<number[]>([]);
+// Per-device topic-source (unsplash/pexels) album bindings.
+const deviceUnsplashAlbumIds = ref<number[]>([]);
+const devicePexelsAlbumIds = ref<number[]>([]);
 const galleryStore = useGalleryStore();
+// Only to know whether the session is still on when a load finishes: a
+// list requested before a logout must not open the password prompt after.
+const authStore = useAuthStore();
 const activeMainTab = ref('devices');
-const activeDataSourceTab = ref('gallery');
-const galleryTab = ref('gallery');
+// Unified source selector for the top card (per-source gallery + settings).
+const sourceTab = ref('gallery');
+const sourceHasGallery = computed(() =>
+  [
+    'gallery',
+    'immich',
+    'synology_photos',
+    'google_photos',
+    'unsplash',
+    'pexels',
+  ].includes(sourceTab.value)
+);
 const confirmDialog = ref();
 
 // Image Source Binding State
 const useThisServer = ref(true);
+// Write-only input for a frame whose own HTTP API needs a password. Never
+// populated from the server, which only reports http_password_set.
+const deviceHttpPassword = ref('');
+// Reveals the password input when adding a frame. Most frames are open, so
+// the field stays out of the way until it is actually needed.
+const deviceNeedsPassword = ref(false);
+watch(deviceNeedsPassword, (needs) => {
+  if (!needs) deviceHttpPassword.value = '';
+});
+
+// The prompt for the frame's password, shared with the device list and the
+// gallery. promptIfNeeded asks on its own when the list loads with a
+// refusing frame; promptFramePassword asks for one device on request.
+const { promptFramePassword, promptIfNeeded } = useFramePasswordPrompt();
+
+// mirrorFramePasswordState copies what the server reports after a password
+// was stored or forgotten onto both copies of the device: the list item
+// (the badge) and the dialog's (its notice and field labels).
+function mirrorFramePasswordState(
+  id: number,
+  res: {
+    http_password_set: boolean;
+    auth_required: boolean;
+    auth_failed_at: string | null;
+  }
+) {
+  for (const target of [
+    availableDevices.value.find((d: Device) => d.id === id),
+    editingDevice.id === id ? editingDevice : undefined,
+  ]) {
+    if (!target) continue;
+    target.http_password_set = res.http_password_set;
+    target.auth_required = res.auth_required;
+    target.auth_failed_at = res.auth_failed_at;
+  }
+}
+
+// promptForEditingDevice asks for the password of the device in the dialog.
+// The list item is what the prompt updates, so the dialog's copy is brought
+// in step afterwards.
+async function promptForEditingDevice() {
+  const id = editingDevice.id;
+  if (!id) return { saved: false as const };
+  const listed = availableDevices.value.find((d: Device) => d.id === id);
+  const result = await promptFramePassword(listed ?? (editingDevice as Device));
+  if (listed && editingDevice.id === id) {
+    editingDevice.http_password_set = listed.http_password_set;
+    editingDevice.auth_required = listed.auth_required;
+    editingDevice.auth_failed_at = listed.auth_failed_at;
+  }
+  return result;
+}
+
+// reflectFrameRefusal shows a refusal the server has just recorded -- after
+// a sync or push it refused -- in the list and in the dialog's copy of the
+// device, before the user is asked for the password: the chip and the
+// notice then stay up if the answer is "Not now".
+async function reflectFrameRefusal(id: number) {
+  await loadDevices();
+  const listed = availableDevices.value.find((d: Device) => d.id === id);
+  if (listed && editingDevice.id === id) {
+    editingDevice.http_password_set = listed.http_password_set;
+    editingDevice.auth_required = listed.auth_required;
+    editingDevice.auth_failed_at = listed.auth_failed_at;
+  }
+}
+
+async function clearDeviceHttpPassword() {
+  if (!editingDevice.id) return;
+  try {
+    const res = await setDeviceHttpPassword(editingDevice.id, '');
+    // Keep the list in sync too, or reopening the device without saving
+    // would still show a stored password.
+    mirrorFramePasswordState(editingDevice.id, res);
+    deviceHttpPassword.value = '';
+    showMessage(
+      res.verified
+        ? 'Forgot the stored frame password. The frame does not ask for one.'
+        : `Forgot the stored frame password. ${res.warning ?? ''}`.trim()
+    );
+  } catch (e: unknown) {
+    showMessage(getApiError(e, 'Could not forget the password.'), true);
+  }
+}
+
+// "Password on the frame": changes the frame itself, through the server.
+const framePasswordFormOpen = ref(false);
+const newFramePassword = ref('');
+const newFramePasswordRepeat = ref('');
+// Mismatch errors only once the user has tried to apply, not while typing.
+const framePasswordTouched = ref(false);
+const framePasswordBusy = ref(false);
+const framePasswordNote = ref<{
+  type: 'success' | 'warning' | 'error';
+  text: string;
+} | null>(null);
+// The server acts on the device's SAVED host. With an unsaved edit of the
+// Host field, the action would hit a different frame than the one shown.
+const framePasswordHostUnsaved = computed(() => {
+  const saved = availableDevices.value.find(
+    (d: Device) => d.id === editingDevice.id
+  );
+  return !!saved && saved.host !== editingDevice.host;
+});
+// A password typed into "Frame password" but not saved yet: the change
+// would sign in with the old stored one instead (a likely wrong guess
+// against the frame), and a later Save would overwrite the new one.
+const framePasswordTypedUnsaved = computed(
+  () => deviceHttpPassword.value !== ''
+);
+// Not while the dialog is saving either: its Save may store a typed
+// password, which must not interleave with a change on the frame. (Save is
+// disabled during a change, for the same reason.)
+const framePasswordReady = computed(
+  () =>
+    !!editingDevice.host &&
+    !framePasswordHostUnsaved.value &&
+    !framePasswordTypedUnsaved.value &&
+    !savingDeviceConfig.value
+);
+const framePasswordProblem = computed(() =>
+  newFramePasswordProblem(newFramePassword.value, newFramePasswordRepeat.value)
+);
+
+// Bumped each time the dialog opens on a device, so a request still in
+// flight from an earlier opening -- of this device or another -- leaves the
+// new one alone.
+let framePasswordGeneration = 0;
+
+function resetFramePasswordState() {
+  framePasswordBusy.value = false;
+  framePasswordFormOpen.value = false;
+  newFramePassword.value = '';
+  newFramePasswordRepeat.value = '';
+  framePasswordTouched.value = false;
+  framePasswordNote.value = null;
+}
+
+function openFramePasswordForm() {
+  resetFramePasswordState();
+  framePasswordFormOpen.value = true;
+}
+
+function closeFramePasswordForm() {
+  const note = framePasswordNote.value;
+  resetFramePasswordState();
+  framePasswordNote.value = note;
+}
+
+async function sendFramePassword(password: string) {
+  // The dialog can be closed and reopened while this is in flight: the
+  // result belongs to the device it was sent for, and to that opening.
+  const deviceId = editingDevice.id;
+  if (!deviceId) return false;
+  const generation = framePasswordGeneration;
+  const stillOpen = () => framePasswordGeneration === generation;
+  framePasswordBusy.value = true;
+  framePasswordNote.value = null;
+  try {
+    const res = await changeFramePassword(
+      deviceId,
+      password,
+      editingDevice.host ?? ''
+    );
+    if (!stillOpen()) {
+      // A later opening may have changed it again since: ask the server,
+      // which saw the changes in order, rather than trust this result.
+      await loadDevices();
+      // And if that later opening is of this same device, its flag too.
+      const fresh = availableDevices.value.find(
+        (d: Device) => d.id === deviceId
+      );
+      if (fresh && editingDevice.id === deviceId) {
+        editingDevice.http_password_set = fresh.http_password_set;
+      }
+      return false;
+    }
+    // The change also cleared the refusal flag, the old password being
+    // gone with whatever it was refused for: the badge goes with it.
+    mirrorFramePasswordState(deviceId, res);
+    const others =
+      password === ''
+        ? 'The frame no longer requires a password. The Home Assistant integration and the mobile app keep working; you can remove the password from them.'
+        : 'Give the new password to the Home Assistant integration and the mobile app too, or they can no longer reach the frame.';
+    framePasswordNote.value = res.verified
+      ? { type: 'success', text: `Done. ${others}` }
+      : {
+          type: 'warning',
+          text: `${res.warning || 'The frame accepted the change, but it could not be confirmed.'} ${others}`,
+        };
+    return true;
+  } catch (e: unknown) {
+    if (stillOpen()) {
+      framePasswordNote.value = {
+        type: 'error',
+        text: getApiError(e, 'Could not change the password on the frame.'),
+      };
+    } else {
+      showMessage(
+        getApiError(e, 'Could not change the password on the frame.'),
+        true
+      );
+    }
+    return false;
+  } finally {
+    if (stillOpen()) framePasswordBusy.value = false;
+  }
+}
+
+async function applyFramePassword() {
+  framePasswordTouched.value = true;
+  if (framePasswordProblem.value) return;
+  // false as well when the dialog moved on to another device meanwhile.
+  const ok = await sendFramePassword(newFramePassword.value);
+  if (ok) closeFramePasswordForm();
+}
+
+async function turnOffFramePassword() {
+  const ok = await confirmDialog.value.open(
+    'The frame will no longer ask for a password: anyone on your network can then open its web page and change its settings. The server stops sending the password.',
+    'Turn off password on the frame?'
+  );
+  if (!ok) return;
+  await sendFramePassword('');
+}
+
 const selectedSource = ref('immich');
 const sourceOptions = [
   { title: 'Gallery', value: 'gallery' },
   { title: 'Immich', value: 'immich' },
   { title: 'Google Photos', value: 'google_photos' },
   { title: 'Synology Photos', value: 'synology_photos' },
+  { title: 'Unsplash', value: 'unsplash' },
+  { title: 'Pexels', value: 'pexels' },
   { title: 'URL Proxy', value: 'url_proxy' },
   { title: 'AI Generation', value: 'ai_generation' },
   { title: 'Fractal (Mandelbrot zoom)', value: 'fractal' },
@@ -2239,14 +3073,28 @@ const loadCalendars = async () => {
 const showEditDeviceDialog = ref(false);
 const editingDevice = reactive<Partial<Device>>({});
 const deviceDialogTab = ref('general');
+
+// Grayscale devices ("gc16", and any future "gc8"/"gc4") hide the color-only
+// controls — the 6-color palette calibration and saturation don't apply.
+const isGrayscale = computed(() =>
+  (editingDevice.display_type ?? '').startsWith('gc')
+);
+// Don't strand the user on a tab that's hidden for the current device type:
+// the Palette tab is color-only; the Grayscale tab is grayscale-only.
+watch(isGrayscale, (gray) => {
+  if (gray && deviceDialogTab.value === 'palette') {
+    deviceDialogTab.value = 'general';
+  } else if (!gray && deviceDialogTab.value === 'grayscale') {
+    deviceDialogTab.value = 'general';
+  }
+});
 const savingDeviceConfig = ref(false);
 const syncingFromDevice = ref(false);
 
 // Device config (synced remotely to device)
 const deviceConfig = reactive<Record<string, any>>({
   auto_rotate: false,
-  rotate_interval: 3600,
-  auto_rotate_aligned: true,
+  rotate_cron: ['0 */12 *'],
   rotation_mode: 'storage',
   image_url: '',
   save_downloaded_images: true,
@@ -2255,13 +3103,105 @@ const deviceConfig = reactive<Record<string, any>>({
   sleep_end_time: '07:00',
   display_orientation: 'landscape',
   display_rotation_deg: 180,
-  timezone_offset: 0,
+  // The POSIX TZ rule the frame stores, kept verbatim (#128). It is never
+  // reduced to an offset: a DST rule used to load as 0 and save as "UTC0".
+  timezone: DEFAULT_TZ_RULE,
   ntp_server: 'pool.ntp.org',
+  // Advanced network settings (firmware #43)
+  ip_mode: 'dhcp',
+  static_ip: '',
+  static_netmask: '255.255.255.0',
+  static_gateway: '',
+  dns_server: '',
   deep_sleep_enabled: true,
   ha_url: '',
   openai_api_key: '',
   google_api_key: '',
 });
+
+// Time zone picker (#128). deviceConfig.timezone is the truth; the picker
+// only names it. Picking a zone writes that zone's rule; a rule no zone
+// yields shows as a synthesized "Fixed offset" or "Custom rule" entry.
+const browserZone = browserTimeZone();
+const browserZoneRule = browserZone === null ? null : ruleForZone(browserZone);
+// The zone the user picked, kept on show while its rule is still the one
+// set: many zones share a rule, and Europe/Berlin must not turn into
+// Africa/Ceuta the moment it is chosen. Null after a load, when the
+// browser's zone is the best guess for a rule the frame already had.
+const tzPicked = ref<string | null>(null);
+const tzChoice = computed(() =>
+  choiceForRule(deviceConfig.timezone, [tzPicked.value, browserZone])
+);
+// The picker value for a rule the table cannot name. Not an IANA name.
+const TZ_UNNAMED = '(unnamed)';
+const tzItems = computed(() => {
+  const items = TIMEZONE_NAMES.map((name) => ({ title: name, value: name }));
+  const choice = tzChoice.value;
+  if (choice.kind === 'fixed') {
+    items.unshift({ title: choice.label, value: TZ_UNNAMED });
+  } else if (choice.kind === 'custom') {
+    items.unshift({ title: 'Custom rule', value: TZ_UNNAMED });
+  }
+  return items;
+});
+const tzZone = computed({
+  get: () => {
+    const choice = tzChoice.value;
+    return choice.kind === 'zone' ? choice.name : TZ_UNNAMED;
+  },
+  set: (name: string | null) => {
+    // Re-picking the synthesized entry, or clearing, changes nothing.
+    const rule = name === null ? null : ruleForZone(name);
+    if (rule === null) return;
+    tzPicked.value = name;
+    deviceConfig.timezone = rule;
+  },
+});
+const tzProblem = computed(() => tzRuleProblem(deviceConfig.timezone));
+const tzHint = computed(() =>
+  tzProblem.value === null
+    ? `POSIX rule ${deviceConfig.timezone}. The rotation schedule runs in this zone.`
+    : 'The rotation schedule runs in this zone.'
+);
+// Where the frame will not keep the named zone's time exactly, say so.
+const tzCaveat = computed(() => {
+  const choice = tzChoice.value;
+  return choice.kind === 'zone' ? zoneCaveat(choice.name) : null;
+});
+// The advanced field is opt-in while the picker can name the rule, and
+// stays open when it cannot: that is the only place such a rule is editable.
+// A load opens it for real when the rule is unnamed, not just by the
+// fallback: a rule being typed can pass through a zone's ("GMT0" on the way
+// to "GMT0BST,..."), and the fallback alone would unmount the field there.
+const tzRuleOpened = ref(false);
+const tzRuleShown = computed({
+  get: () => tzRuleOpened.value || tzChoice.value.kind !== 'zone',
+  set: (shown: boolean) => {
+    tzRuleOpened.value = shown;
+  },
+});
+const useBrowserZone = () => {
+  if (browserZoneRule === null) return;
+  tzPicked.value = browserZone;
+  deviceConfig.timezone = browserZoneRule;
+};
+// On focus Vuetify puts the shown name in the search box, unselected, so
+// typing would append to "Africa/Ceuta" and match nothing. Select it, so
+// typing replaces it; the name it filled in lands in the box a tick later.
+const selectTzSearch = (e: FocusEvent) => {
+  const el = e.target;
+  if (el instanceof HTMLInputElement) nextTick(() => el.select());
+};
+
+// Whether the device firmware understands rotate_cron. Old firmware reports
+// only rotate_interval and silently ignores a cron schedule. Best-effort:
+// derived from the loaded config, which is the server's stored copy.
+const deviceSupportsCron = ref(true);
+
+// Whether the device firmware supports static IP / DNS override (#43).
+// Detected by key presence in the stored config; old firmware must render
+// (and be sent) exactly what it did before.
+const deviceSupportsStaticIp = ref(false);
 
 // Device processing settings (synced remotely)
 const deviceProcessing = reactive({
@@ -2276,6 +3216,8 @@ const deviceProcessing = reactive({
   colorMethod: 'rgb',
   ditherAlgorithm: 'floyd-steinberg',
   compressDynamicRange: true,
+  scaleMode: 'cover',
+  backgroundColor: 'white',
 });
 
 // Processing presets from epaper-image-convert library
@@ -2327,6 +3269,11 @@ const detectProcessingPreset = () => {
       if (!(k in preset)) return true; // Skip keys not in this preset
       const pv = (preset as any)[k];
       const dv = (deviceProcessing as any)[k];
+      // Tolerant number compare: the device persists floats as 32-bit, so e.g.
+      // 1.4 round-trips as 1.39999998 and exact matching would miss the preset.
+      if (typeof pv === 'number' && typeof dv === 'number') {
+        return Math.abs(pv - dv) < 1e-3;
+      }
       return pv === dv;
     });
     if (matches) {
@@ -2364,6 +3311,19 @@ const devicePalette = reactive<
   red: { r: 135, g: 19, b: 0 },
   blue: { r: 5, g: 64, b: 158 },
   green: { r: 39, g: 102, b: 60 },
+});
+
+// Grayscale (GC16) calibration — the panel-measured relative luminance (Y, 0..1)
+// of full black / full white. Synced to the device through the same per-device
+// palette path as the 6-color palette (color_palette: { black_y, white_y }).
+const grayscaleCal = reactive<{
+  black_y: number;
+  white_y: number;
+  gamma: number;
+}>({
+  black_y: 0.009,
+  white_y: 0.65,
+  gamma: 1.42,
 });
 
 // Auto-update mDNS hostname when device name changes
@@ -2427,17 +3387,18 @@ const orientationOptions = computed(() => {
   ];
 });
 
-const rotateIntervalOptions = [
-  { title: '5 minutes', value: 300 },
-  { title: '15 minutes', value: 900 },
-  { title: '30 minutes', value: 1800 },
-  { title: '1 hour', value: 3600 },
-  { title: '2 hours', value: 7200 },
-  { title: '4 hours', value: 14400 },
-  { title: '6 hours', value: 21600 },
-  { title: '12 hours', value: 43200 },
-  { title: '24 hours', value: 86400 },
-];
+// Quiet-hours window (minutes since midnight) for the schedule preview.
+const sleepPreviewWindow = computed(() => {
+  const toMin = (hhmm: string) => {
+    const [h, m] = (hhmm || '0:0').split(':').map(Number);
+    return (h || 0) * 60 + (m || 0);
+  };
+  return {
+    enabled: deviceConfig.sleep_schedule_enabled,
+    start: toMin(deviceConfig.sleep_start_time),
+    end: toMin(deviceConfig.sleep_end_time),
+  };
+});
 
 const loadDeviceConfig = async (deviceId: number) => {
   try {
@@ -2453,30 +3414,45 @@ const loadDeviceConfig = async (deviceId: number) => {
     }
     Object.assign(deviceConfig, {
       auto_rotate: cfg.auto_rotate ?? false,
-      rotate_interval: cfg.rotate_interval ?? 3600,
-      auto_rotate_aligned: cfg.auto_rotate_aligned ?? true,
+      // Prefer rotate_cron; fall back to a legacy rotate_interval (older
+      // firmware) so the schedule still shows correctly, else the default.
+      rotate_cron:
+        Array.isArray(cfg.rotate_cron) && cfg.rotate_cron.length
+          ? cfg.rotate_cron
+          : typeof cfg.rotate_interval === 'number'
+            ? [intervalToCron(cfg.rotate_interval)]
+            : ['0 */12 *'],
       rotation_mode: cfg.rotation_mode ?? 'storage',
       image_url: cfg.image_url ?? '',
       save_downloaded_images: cfg.save_downloaded_images ?? true,
     });
+    // Old firmware reports rotate_interval and no rotate_cron.
+    deviceSupportsCron.value = Array.isArray(cfg.rotate_cron);
 
-    // Detect if image_url points to this server
-    const imgUrl = cfg.image_url || '';
-    let isThisServer = false;
-    if (imgUrl.includes('/image/')) {
-      try {
-        const imgHost = new URL(imgUrl).hostname;
-        const serverHost = window.location.hostname;
-        isThisServer = imgHost === serverHost;
-      } catch {
-        isThisServer = false;
+    // Prefer the device's persisted `source` field. Fall back to parsing the
+    // image_url for back-compat with devices configured before `source` existed.
+    if (editingDevice.source) {
+      useThisServer.value = true;
+      selectedSource.value = editingDevice.source;
+    } else {
+      // Detect if image_url points to this server
+      const imgUrl = cfg.image_url || '';
+      let isThisServer = false;
+      if (imgUrl.includes('/image')) {
+        try {
+          const imgHost = new URL(imgUrl).hostname;
+          const serverHost = window.location.hostname;
+          isThisServer = imgHost === serverHost;
+        } catch {
+          isThisServer = false;
+        }
       }
-    }
-    useThisServer.value = isThisServer;
-    if (isThisServer) {
-      const match = imgUrl.match(/\/image\/([^/?]+)/);
-      if (match) {
-        selectedSource.value = match[1];
+      useThisServer.value = isThisServer;
+      if (isThisServer) {
+        const match = imgUrl.match(/\/image\/([^/?]+)/);
+        if (match) {
+          selectedSource.value = match[1];
+        }
       }
     }
 
@@ -2488,25 +3464,28 @@ const loadDeviceConfig = async (deviceId: number) => {
       deep_sleep_enabled: cfg.deep_sleep_enabled ?? true,
       ha_url: cfg.ha_url ?? '',
       ntp_server: cfg.ntp_server ?? 'pool.ntp.org',
+      ip_mode: cfg.ip_mode ?? 'dhcp',
+      static_ip: cfg.static_ip ?? '',
+      static_netmask: cfg.static_netmask || '255.255.255.0',
+      static_gateway: cfg.static_gateway ?? '',
+      dns_server: cfg.dns_server ?? '',
       openai_api_key: cfg.openai_api_key ?? '',
       google_api_key: cfg.google_api_key ?? '',
     });
+    deviceSupportsStaticIp.value = 'ip_mode' in cfg;
     const startMin = cfg.sleep_schedule_start ?? 1380;
     deviceConfig.sleep_start_time = `${String(Math.floor(startMin / 60)).padStart(2, '0')}:${String(startMin % 60).padStart(2, '0')}`;
     const endMin = cfg.sleep_schedule_end ?? 420;
     deviceConfig.sleep_end_time = `${String(Math.floor(endMin / 60)).padStart(2, '0')}:${String(endMin % 60).padStart(2, '0')}`;
 
-    // Parse POSIX timezone (e.g., "UTC-8" → 8, "UTC+1" → -1, POSIX sign is inverted)
-    const tz = cfg.timezone || 'UTC0';
-    const tzMatch = tz.match(/UTC([+-]?)(\d+)(?::(\d+))?/);
-    if (tzMatch) {
-      const sign = tzMatch[1] === '-' ? 1 : -1;
-      const hours = parseInt(tzMatch[2]) || 0;
-      const minutes = parseInt(tzMatch[3]) || 0;
-      deviceConfig.timezone_offset = sign * (hours + minutes / 60);
-    } else {
-      deviceConfig.timezone_offset = 0;
-    }
+    // The frame's POSIX TZ rule, verbatim. Whatever it is -- a fixed offset,
+    // a DST rule, something typed by hand -- it goes back unchanged on save.
+    deviceConfig.timezone =
+      typeof cfg.timezone === 'string' && cfg.timezone !== ''
+        ? cfg.timezone
+        : DEFAULT_TZ_RULE;
+    tzPicked.value = null;
+    tzRuleOpened.value = tzChoice.value.kind !== 'zone';
 
     // Processing settings
     const proc = parse(data.processing_settings);
@@ -2524,7 +3503,17 @@ const loadDeviceConfig = async (deviceId: number) => {
         ditherAlgorithm: proc.ditherAlgorithm ?? 'floyd-steinberg',
         compressDynamicRange: proc.compressDynamicRange ?? true,
       });
+    } else if (isGrayscale.value) {
+      // New grayscale frame (no saved settings): default to the grayscale preset.
+      applyProcessingPreset('grayscale');
     }
+    // Layout fields are initialized on EVERY load -- even when the device has
+    // no stored processing settings -- falling back to the legacy server-side
+    // fields; otherwise values linger from the previously edited device.
+    deviceProcessing.scaleMode =
+      proc.scaleMode ?? (editingDevice.display_mode || 'cover');
+    deviceProcessing.backgroundColor =
+      proc.backgroundColor ?? (editingDevice.background_color || 'white');
     detectProcessingPreset();
 
     // Color palette
@@ -2538,6 +3527,21 @@ const loadDeviceConfig = async (deviceId: number) => {
         };
       }
     }
+
+    // Grayscale calibration shares the color_palette payload: a calibrated GC16
+    // panel stores just { black_y, white_y }. Fall back to GC16 defaults so the
+    // inputs always bind to a number. Round to 3 digits -- the firmware stores Y
+    // as a float32, so a saved 0.90 round-trips as 0.899999976...
+    const round3 = (v: number) => Math.round(v * 1000) / 1000;
+    grayscaleCal.black_y = round3(
+      typeof pal.black_y === 'number' ? pal.black_y : 0.009
+    );
+    grayscaleCal.white_y = round3(
+      typeof pal.white_y === 'number' ? pal.white_y : 0.65
+    );
+    grayscaleCal.gamma = round3(
+      typeof pal.gamma === 'number' ? pal.gamma : 1.42
+    );
   } catch {
     // No config saved yet, use defaults
   }
@@ -2558,6 +3562,14 @@ const syncFromDevice = async () => {
     await loadDeviceConfig(editingDevice.id!);
     showMessage('Settings synced from device');
   } catch (e: any) {
+    if (isFrameAuthRefusal(e)) {
+      // The frame wants its password: show the refusal, ask, and sync again
+      // once the password is in.
+      syncingFromDevice.value = false;
+      await reflectFrameRefusal(editingDevice.id);
+      if ((await promptForEditingDevice()).saved) await syncFromDevice();
+      return;
+    }
     showMessage(
       'Failed to sync: ' + (e.response?.data?.error || e.message),
       true
@@ -2656,15 +3668,6 @@ const dateFormatOptions = [
   { label: 'YYYY.MM.DD', value: '2006.01.02' },
 ];
 
-const layoutDescriptions: Record<string, string> = {
-  photo_info:
-    'Photo on top with a dedicated info strip showing date, weather, and calendar events.',
-  photo_overlay:
-    'Full-screen photo with a semi-transparent overlay showing date, weather, and events.',
-  side_panel:
-    'Photo with a side panel (landscape) or bottom panel (portrait) showing weather and events.',
-};
-
 const aiModelOptionsForProvider = (provider: string | undefined) => {
   if (provider === 'openai') {
     return [
@@ -2690,12 +3693,21 @@ const getDeviceName = (id: number) => {
   return dev ? dev.name : `Device ${id}`;
 };
 
-watch(activeDataSourceTab, (val) => {
+watch(sourceTab, (val) => {
+  // Drive the top gallery for gallery-capable sources.
+  if (sourceHasGallery.value) {
+    galleryStore.setSource(
+      val as 'gallery' | 'immich' | 'synology_photos' | 'google_photos'
+    );
+  }
+  // Lazy-load per-source data the first time its tab is opened.
   if (val === 'url') {
     loadURLSources();
-  } else if (val === 'google') {
+  } else if (val === 'google_photos') {
     loadCalendars();
   }
+  // Persist the active source tab in the URL hash so a refresh restores it.
+  if (val) window.location.hash = 'gtab=' + val;
 });
 
 // Devices State
@@ -2747,14 +3759,15 @@ const openAddDeviceDialog = () => {
     ai_prompt: '',
     layout: 'photo_overlay',
     display_mode: 'cover',
+    background_color: 'white',
     show_calendar: false,
     calendar_id: '',
     date_format: '',
+    source: '',
   });
   Object.assign(deviceConfig, {
     auto_rotate: false,
-    rotate_interval: 3600,
-    auto_rotate_aligned: true,
+    rotate_cron: ['0 */12 *'],
     rotation_mode: 'storage',
     image_url: '',
     save_downloaded_images: true,
@@ -2762,27 +3775,110 @@ const openAddDeviceDialog = () => {
     sleep_start_time: '23:00',
     sleep_end_time: '07:00',
     display_orientation: 'landscape',
+    timezone: DEFAULT_TZ_RULE,
     deep_sleep_enabled: true,
   });
+  tzPicked.value = null;
+  tzRuleOpened.value = false;
+  // The Display Settings selects bind to deviceProcessing; without a reset
+  // they would carry the previously edited device's layout into the dialog
+  deviceProcessing.scaleMode = 'cover';
+  deviceProcessing.backgroundColor = 'white';
   isAddingDevice.value = true;
+  deviceNeedsPassword.value = false;
+  deviceHttpPassword.value = '';
   deviceDialogTab.value = 'general';
   showEditDeviceDialog.value = true;
 };
 
+const batteryIcon = (level: number) => {
+  if (level >= 95) return 'mdi-battery';
+  if (level <= 5) return 'mdi-battery-outline';
+  return `mdi-battery-${Math.max(1, Math.round(level / 10)) * 10}`;
+};
+
+const formatReportedAt = (iso?: string) => {
+  if (!iso) return 'unknown';
+  const d = new Date(iso);
+  return isNaN(d.getTime()) ? 'unknown' : d.toLocaleString();
+};
+
+const deviceURL = (device: Device) => {
+  return /^https?:\/\//.test(device.host)
+    ? device.host
+    : `http://${device.host}`;
+};
+
 const editDevice = async (device: Device) => {
   Object.assign(editingDevice, device);
+  if (!editingDevice.background_color) {
+    editingDevice.background_color = 'white';
+  }
   // Initialize display_orientation from device's orientation
   deviceConfig.display_orientation = device.orientation || 'landscape';
   isAddingDevice.value = false;
+  // Never carry a half-typed password over from another device's dialog.
+  deviceHttpPassword.value = '';
+  framePasswordGeneration++;
+  resetFramePasswordState();
   deviceDialogTab.value = 'general';
   showEditDeviceDialog.value = true;
+  deviceImmichAlbumIds.value = [];
+  deviceSynologyAlbumIds.value = [];
+  deviceUnsplashAlbumIds.value = [];
+  devicePexelsAlbumIds.value = [];
   // Load device remote config
   await loadDeviceConfig(device.id);
+  // Load Immich album options + this device's bindings (best-effort)
+  if (immichConnected.value) {
+    try {
+      await immichStore.fetchSyncedAlbums();
+      const res = await api.get(`/devices/${device.id}/albums?source=immich`);
+      deviceImmichAlbumIds.value = res.data?.album_ids || [];
+    } catch (e) {
+      // Non-fatal: leave bindings empty
+    }
+  }
+  // Load Synology album options + this device's bindings (best-effort)
+  if (form.synology_sid) {
+    try {
+      await synologyStore.fetchSyncedAlbums();
+      const res = await api.get(
+        `/devices/${device.id}/albums?source=synology_photos`
+      );
+      deviceSynologyAlbumIds.value = res.data?.album_ids || [];
+    } catch (e) {
+      // Non-fatal: leave bindings empty
+    }
+  }
+  // Load topic-source album options + this device's bindings (best-effort).
+  const topicBindingRefs: Record<string, typeof deviceUnsplashAlbumIds> = {
+    unsplash: deviceUnsplashAlbumIds,
+    pexels: devicePexelsAlbumIds,
+  };
+  await Promise.all(
+    Object.keys(topicStores).map(async (source) => {
+      try {
+        await topicStores[source].fetchSyncedAlbums();
+        const res = await api.get(
+          `/devices/${device.id}/albums?source=${source}`
+        );
+        topicBindingRefs[source].value = res.data?.album_ids || [];
+      } catch (e) {
+        // Non-fatal: leave bindings empty
+      }
+    })
+  );
 };
 
 const saveDevice = async () => {
   if (!editingDevice.host) {
     showMessage('Host is required', true);
+    return;
+  }
+  // The frame would truncate or misapply the rule without a word (#128).
+  if (tzProblem.value !== null) {
+    showMessage(`Time zone: ${tzProblem.value}`, true);
     return;
   }
   if (editingDevice.show_weather) {
@@ -2799,6 +3895,10 @@ const saveDevice = async () => {
     }
   }
   savingDeviceConfig.value = true;
+  // Set when the frame refused the direct config push: the prompt for its
+  // password waits until the dialog is closed.
+  let pushRefused = false;
+  const savedId = editingDevice.id;
   try {
     if (isAddingDevice.value) {
       const newDevice = await addDevice({
@@ -2810,11 +3910,13 @@ const saveDevice = async () => {
         weather_lat: editingDevice.weather_lat || 0,
         weather_lon: editingDevice.weather_lon || 0,
         layout: editingDevice.layout || 'photo_overlay',
-        display_mode: editingDevice.display_mode || 'cover',
+        display_mode: deviceProcessing.scaleMode || 'cover',
         show_calendar: editingDevice.show_calendar || false,
         calendar_id: editingDevice.calendar_id || '',
         date_format: editingDevice.date_format || '',
+        http_password: deviceHttpPassword.value || undefined,
       });
+      deviceHttpPassword.value = '';
       await loadDevices();
       showMessage('Device added. Fetched settings from device.');
       // Re-open in edit mode with fetched config
@@ -2828,7 +3930,94 @@ const saveDevice = async () => {
       }
     } else {
       if (!editingDevice.id) return;
-      // Save server-side device fields
+      // Per-device source: stored on the device record when this server is the
+      // URL image source; empty otherwise.
+      const deviceSource =
+        useThisServer.value && deviceConfig.rotation_mode === 'url'
+          ? selectedSource.value
+          : '';
+
+      // Save device remote config (config + processing + palette)
+      const [startH, startM] = deviceConfig.sleep_start_time
+        .split(':')
+        .map(Number);
+      const [endH, endM] = deviceConfig.sleep_end_time.split(':').map(Number);
+
+      // Compute image URL: use server URL if "use this server" is checked.
+      // getImageUrl() targets the direct add-on port, so the URL works when
+      // the ESP32 reaches the server straight (ingress port 8123 cannot serve
+      // /image/*).
+      let imageUrl = deviceConfig.image_url;
+      if (useThisServer.value && deviceConfig.rotation_mode === 'url') {
+        imageUrl = getImageUrl();
+      }
+
+      // Reconcile the schedule with firmware capability.
+      // - New firmware: send rotate_cron, plus a derived rotate_interval when
+      //   the schedule is a simple every-day interval (harmless; ignored in
+      //   favour of rotate_cron).
+      // - Old firmware: it only understands rotate_interval and silently
+      //   ignores rotate_cron. Send interval-only so we don't store a phantom
+      //   cron the device isn't running; refuse a schedule that can't be
+      //   reduced to an interval instead of losing the edit.
+      // The device rejects the whole config request on any invalid rule or a
+      // set over the 7-rule budget — refuse to save one it won't accept.
+      const cronRules: string[] = deviceConfig.rotate_cron || [];
+      if (
+        cronRules.length < 1 ||
+        cronRules.length > 7 ||
+        !cronRules.every((r: string) => isValidCron(r))
+      ) {
+        showMessage(
+          'The rotation schedule is invalid (a rule is malformed or there are ' +
+            'more than 7 rules). Fix it before saving.',
+          true
+        );
+        return;
+      }
+      const legacyInterval = cronToInterval(deviceConfig.rotate_cron);
+      if (!deviceSupportsCron.value && legacyInterval === null) {
+        showMessage(
+          "This device's firmware only supports a simple repeating interval. " +
+            'Update the firmware to use day-of-week or specific-time schedules.',
+          true
+        );
+        return;
+      }
+      const rotateFields = deviceSupportsCron.value
+        ? {
+            rotate_cron: deviceConfig.rotate_cron,
+            ...(legacyInterval !== null
+              ? { rotate_interval: legacyInterval }
+              : {}),
+          }
+        : { rotate_interval: legacyInterval };
+
+      // Quiet hours only exist on pre-cron firmware; cron firmware bounds the
+      // active hours in the rules instead, so don't send these to it.
+      const sleepFields = deviceSupportsCron.value
+        ? {}
+        : {
+            sleep_schedule_enabled: deviceConfig.sleep_schedule_enabled,
+            sleep_schedule_start: startH * 60 + startM,
+            sleep_schedule_end: endH * 60 + endM,
+          };
+
+      // Static IP / DNS exist only on firmware reporting ip_mode; don't send
+      // the fields to older firmware (#43).
+      const networkFields = deviceSupportsStaticIp.value
+        ? {
+            ip_mode: deviceConfig.ip_mode,
+            static_ip: deviceConfig.static_ip,
+            static_netmask: deviceConfig.static_netmask,
+            static_gateway: deviceConfig.static_gateway,
+            dns_server: deviceConfig.dns_server,
+          }
+        : {};
+
+      // Save server-side device fields, the host among them, before the
+      // password: the server checks that against the saved host, so a host
+      // typed alongside it is the one it is checked at.
       await updateDevice(
         editingDevice.id,
         editingDevice.name!,
@@ -2844,75 +4033,161 @@ const saveDevice = async () => {
         editingDevice.ai_model || '',
         editingDevice.ai_prompt || '',
         editingDevice.layout || 'photo_overlay',
-        editingDevice.display_mode || 'cover',
+        deviceProcessing.scaleMode || 'cover',
         editingDevice.show_calendar || false,
         editingDevice.calendar_id || '',
-        editingDevice.date_format || ''
+        editingDevice.date_format || '',
+        deviceSource,
+        deviceProcessing.backgroundColor || ''
       );
 
-      // Save device remote config (config + processing + palette)
-      const [startH, startM] = deviceConfig.sleep_start_time
-        .split(':')
-        .map(Number);
-      const [endH, endM] = deviceConfig.sleep_end_time.split(':').map(Number);
-
-      // Convert UTC offset to POSIX timezone format (sign is inverted)
-      const offsetVal = deviceConfig.timezone_offset || 0;
-      let timezone = 'UTC0';
-      if (offsetVal !== 0) {
-        const absOff = Math.abs(offsetVal);
-        const h = Math.floor(absOff);
-        const m = Math.round((absOff - h) * 60);
-        const sign = offsetVal > 0 ? '-' : '+';
-        timezone =
-          m === 0
-            ? `UTC${sign}${h}`
-            : `UTC${sign}${h}:${String(m).padStart(2, '0')}`;
-      }
-
-      // Compute image URL: use server URL if "use this server" is checked.
-      // getImageUrl() targets the direct add-on port, so the URL works when
-      // the ESP32 reaches the server straight (ingress port 8123 cannot serve
-      // /image/*).
-      let imageUrl = deviceConfig.image_url;
-      if (useThisServer.value && deviceConfig.rotation_mode === 'url') {
-        imageUrl = getImageUrl(selectedSource.value);
+      // Write-only: only send when the field was filled in. Blank leaves any
+      // stored password alone, matching how the frame treats a null. Done
+      // after validation, so a rejected save does not change the credential,
+      // after the host is saved, so it is checked at that host, and before
+      // the config push, which has to authenticate with it. The server checks
+      // it with the frame first: one the frame rejects stops the save here,
+      // to be corrected, with the fields above saved and said so; one the
+      // frame cannot confirm is kept, and noted with the outcome.
+      let passwordNote = '';
+      if (deviceHttpPassword.value !== '') {
+        let stored;
+        try {
+          stored = await setDeviceHttpPassword(
+            editingDevice.id!,
+            deviceHttpPassword.value
+          );
+        } catch (e: unknown) {
+          if (!isFrameAuthRefusal(e)) throw e;
+          showMessage(
+            'Frame password: ' +
+              getApiError(e, 'the frame rejected it.') +
+              " The device's other settings were saved; the frame's settings were not sent. Fix the password and save again.",
+            true
+          );
+          // The list shows the fields just saved, whatever the dialog does next.
+          await loadDevices();
+          return;
+        }
+        deviceHttpPassword.value = '';
+        mirrorFramePasswordState(editingDevice.id!, stored);
+        if (!stored.verified && stored.warning) {
+          passwordNote = ' ' + stored.warning;
+        }
       }
 
       const result = await updateDeviceConfig(editingDevice.id, {
         config: {
           device_name: editingDevice.name,
           auto_rotate: deviceConfig.auto_rotate,
-          rotate_interval: deviceConfig.rotate_interval,
-          auto_rotate_aligned: deviceConfig.auto_rotate_aligned,
+          ...rotateFields,
           rotation_mode: deviceConfig.rotation_mode,
           image_url: imageUrl,
           save_downloaded_images: deviceConfig.save_downloaded_images,
-          sleep_schedule_enabled: deviceConfig.sleep_schedule_enabled,
-          sleep_schedule_start: startH * 60 + startM,
-          sleep_schedule_end: endH * 60 + endM,
+          ...sleepFields,
           display_orientation: deviceConfig.display_orientation,
           display_rotation_deg: deviceConfig.display_rotation_deg,
-          timezone: timezone,
+          timezone: deviceConfig.timezone,
           ntp_server: deviceConfig.ntp_server,
+          ...networkFields,
           deep_sleep_enabled: deviceConfig.deep_sleep_enabled,
           ha_url: deviceConfig.ha_url,
           openai_api_key: deviceConfig.openai_api_key,
           google_api_key: deviceConfig.google_api_key,
         },
         processing_settings: { ...deviceProcessing },
-        color_palette: { ...devicePalette },
+        // Grayscale (GC16) panels are calibrated by two luminance endpoints;
+        // color panels by the 6 named colors. Both ride the same color_palette
+        // field, which the server stores and the device pulls via X-Config-Payload.
+        color_palette: isGrayscale.value
+          ? {
+              black_y: grayscaleCal.black_y,
+              white_y: grayscaleCal.white_y,
+              gamma: grayscaleCal.gamma,
+            }
+          : { ...devicePalette },
       });
+
+      // Persist per-device Immich album bindings (best-effort).
+      if (immichConnected.value) {
+        try {
+          await api.put(`/devices/${editingDevice.id}/albums`, {
+            source: 'immich',
+            album_ids: deviceImmichAlbumIds.value,
+          });
+        } catch (e: any) {
+          showMessage(
+            'Device saved, but failed to save Immich album bindings: ' +
+              (e.response?.data?.error || e.message),
+            true
+          );
+        }
+      }
+
+      // Persist per-device Synology album bindings (best-effort).
+      if (form.synology_sid) {
+        try {
+          await api.put(`/devices/${editingDevice.id}/albums`, {
+            source: 'synology_photos',
+            album_ids: deviceSynologyAlbumIds.value,
+          });
+        } catch (e: any) {
+          showMessage(
+            'Device saved, but failed to save Synology album bindings: ' +
+              (e.response?.data?.error || e.message),
+            true
+          );
+        }
+      }
+
+      // Persist per-device topic-source album bindings (best-effort).
+      const topicBindings: Record<string, number[]> = {
+        unsplash: deviceUnsplashAlbumIds.value,
+        pexels: devicePexelsAlbumIds.value,
+      };
+      for (const [source, album_ids] of Object.entries(topicBindings)) {
+        try {
+          await api.put(`/devices/${editingDevice.id}/albums`, {
+            source,
+            album_ids,
+          });
+        } catch (e: any) {
+          showMessage(
+            `Device saved, but failed to save ${source} album bindings: ` +
+              (e.response?.data?.error || e.message),
+            true
+          );
+        }
+      }
+
       if (result.push_result === 'synced') {
-        showMessage('Device saved and config pushed to device.');
+        showMessage('Device saved and config pushed to device.' + passwordNote);
+      } else if (result.push_result === 'auth_required') {
+        // Saved server-side and delivered with the frame's next image fetch
+        // (the frame's own channel, not password-gated); only the direct
+        // push was refused. Asked for the password once the dialog is away.
+        showMessage(
+          "Device saved. The frame refused the server's password, so the config will sync on its next image fetch." +
+            passwordNote
+        );
+        pushRefused = true;
       } else {
         showMessage(
-          'Device saved. Device is offline — config will sync on next image fetch.'
+          'Device saved. Device is offline — config will sync on next image fetch.' +
+            passwordNote
         );
       }
     }
     await loadDevices();
     showEditDeviceDialog.value = false;
+    if (pushRefused && savedId) {
+      const refused = availableDevices.value.find(
+        (d: Device) => d.id === savedId
+      );
+      if (refused?.auth_required && authStore.isLoggedIn) {
+        void promptFramePassword(refused);
+      }
+    }
   } catch (e: any) {
     showMessage(
       'Failed to save device: ' + (e.response?.data?.error || e.message),
@@ -2923,10 +4198,27 @@ const saveDevice = async () => {
   }
 };
 
+// Closing the device dialog, however it opens next (another device, the
+// same one, or Add Device), leaves any frame password request still in
+// flight to the device list alone.
+watch(showEditDeviceDialog, (open) => {
+  if (!open) {
+    framePasswordGeneration++;
+    resetFramePasswordState();
+  }
+});
+
 const loadDevices = async () => {
   deviceListLoading.value = true;
   try {
     availableDevices.value = await listDevices();
+    // A frame refusing the server gets asked about as soon as the list
+    // shows it -- but not over the device dialog, where the field for it
+    // is, not again once put off (see useFramePasswordPrompt), and not for
+    // a session that ended while the list was loading.
+    if (authStore.isLoggedIn && !showEditDeviceDialog.value) {
+      promptIfNeeded(availableDevices.value);
+    }
   } catch (e) {
     console.error('Failed to list devices', e);
   } finally {
@@ -2951,23 +4243,25 @@ const removeDevice = async (id: number) => {
   }
 };
 
-watch(galleryTab, (val) => {
-  if (val === 'google_photos') {
-    galleryStore.setSource('google_photos');
-  } else if (val === 'synology_photos') {
-    galleryStore.setSource('synology_photos');
-  } else if (val === 'immich') {
-    galleryStore.setSource('immich');
-  } else if (val === 'gallery') {
-    galleryStore.setSource('gallery');
+const SOURCE_TABS = [
+  'gallery',
+  'immich',
+  'synology_photos',
+  'google_photos',
+  'unsplash',
+  'pexels',
+  'url',
+  'ai_generation',
+];
+// Restore the active source tab from the URL hash (#gtab=<tab>) on load.
+const restoreGalleryTabFromHash = () => {
+  const m = window.location.hash.match(/gtab=([\w-]+)/);
+  if (m && SOURCE_TABS.includes(m[1])) {
+    sourceTab.value = m[1];
   }
-});
+};
 
-const snackbar = reactive({
-  show: false,
-  message: '',
-  color: 'success',
-});
+const { showMessage } = useSnackbar();
 
 const form = reactive({
   Orientation: 'landscape',
@@ -2995,6 +4289,7 @@ const form = reactive({
   immich_url: '',
   immich_api_key: '',
   immich_source_mode: 'album',
+  immich_memory_mode: 'all',
   immich_album_id: '',
   immich_auto_sync_enabled: false,
   immich_auto_sync_interval_minutes: 60,
@@ -3004,22 +4299,161 @@ const form = reactive({
   telegram_target_device_id: [] as number[],
   openai_api_key: '',
   google_api_key: '',
+  // Topic sources.
+  unsplash_api_key: '',
+  pexels_api_key: '',
+  unsplash_auto_sync_enabled: false,
+  unsplash_auto_sync_interval_minutes: 60,
+  unsplash_randomize_results: false,
+  pexels_auto_sync_enabled: false,
+  pexels_auto_sync_interval_minutes: 60,
+  pexels_randomize_results: false,
+  // Device-facing base URL for image requests (e.g. http://homeassistant.local:9608).
+  // Empty = derive from the browser's location.
+  device_image_base_url: '',
   device_host: '', // Keep for backward compatibility/display? Or remove. Remove from form, keep in store maybe?
 });
 
-const synologyAlbumOptions = computed(() => {
-  return form.albums;
+// Synced (persisted) Immich albums available for per-device binding.
+// Items use the internal album row id (number) as the value.
+const deviceImmichAlbumOptions = computed(() => {
+  return (immichStore.syncedAlbums || [])
+    .filter((a: any) => a.sync_enabled)
+    .map((a: any) => ({ id: a.id, name: a.name }));
 });
 
-const immichAlbumOptions = computed(() => {
-  return form.immich_albums.map((a: any) => ({ id: a.id, name: a.albumName }));
+// Synced (persisted) Synology albums available for per-device binding.
+// Items use the internal album row id (number) as the value.
+const deviceSynologyAlbumOptions = computed(() => {
+  return (synologyStore.syncedAlbums || [])
+    .filter((a: any) => a.sync_enabled)
+    .map((a: any) => ({ id: a.id, name: a.name }));
 });
 
-const immichSourceModeOptions = [
-  { title: 'One album', value: 'album' },
-  { title: 'Entire library', value: 'all' },
-  { title: 'Favorites only', value: 'favorites' },
-  { title: 'Memories (on this day)', value: 'memories' },
+// Synced topic albums available for per-device binding (topic sources).
+const topicAlbumOptions = (store: any) =>
+  (store.syncedAlbums || [])
+    .filter((a: any) => a.sync_enabled)
+    .map((a: any) => ({ id: a.id, name: a.name }));
+const deviceUnsplashAlbumOptions = computed(() =>
+  topicAlbumOptions(unsplashStore)
+);
+const devicePexelsAlbumOptions = computed(() => topicAlbumOptions(pexelsStore));
+
+// Album search + checked-first sorting now live in <AlbumPicker>.
+
+// Derive the Synology checkbox selection from the persisted synced albums.
+// External ids are matched against String(album.id) of live Synology albums.
+const applySynologySyncedAlbumState = () => {
+  suppressSyncAutoSave = true;
+  synologySyncAlbumIds.value = (synologyStore.syncedAlbums || [])
+    .filter((a: any) => a.sync_enabled)
+    .map((a: any) => a.external_id);
+  nextTick(() => {
+    suppressSyncAutoSave = false;
+  });
+};
+
+// Virtual sentinel external_ids used by the backend for non-album sources.
+const IMMICH_FAVORITES_ID = '__favorites__';
+const IMMICH_ALL_ID = '__all__';
+const IMMICH_MEMORIES_ID = '__memories__';
+
+// Derive the checkbox selection state from the persisted synced albums.
+const applySyncedAlbumState = () => {
+  suppressSyncAutoSave = true;
+  const synced = (immichStore.syncedAlbums || []).filter(
+    (a: any) => a.sync_enabled
+  );
+  syncFavorites.value = synced.some(
+    (a: any) => a.external_id === IMMICH_FAVORITES_ID
+  );
+  syncAll.value = synced.some((a: any) => a.external_id === IMMICH_ALL_ID);
+  syncMemories.value = synced.some(
+    (a: any) => a.external_id === IMMICH_MEMORIES_ID
+  );
+  syncAlbumIds.value = synced
+    .filter(
+      (a: any) =>
+        a.kind === 'album' &&
+        a.external_id !== IMMICH_FAVORITES_ID &&
+        a.external_id !== IMMICH_ALL_ID &&
+        a.external_id !== IMMICH_MEMORIES_ID
+    )
+    .map((a: any) => a.external_id);
+  nextTick(() => {
+    suppressSyncAutoSave = false;
+  });
+};
+
+// Persist the album selection (debounced) without importing — the user syncs
+// manually or is prompted on leaving. Suppressed during programmatic apply.
+watch(
+  [syncAlbumIds, syncFavorites, syncAll, syncMemories],
+  () => {
+    if (suppressSyncAutoSave) return;
+    immichSyncDirty.value = true;
+    if (immichSyncSaveTimer != null) clearTimeout(immichSyncSaveTimer);
+    immichSyncSaveTimer = window.setTimeout(() => saveSyncSelection(), 600);
+  },
+  { deep: true }
+);
+watch(
+  synologySyncAlbumIds,
+  () => {
+    if (suppressSyncAutoSave) return;
+    synologySyncDirty.value = true;
+    if (synologySyncSaveTimer != null) clearTimeout(synologySyncSaveTimer);
+    synologySyncSaveTimer = window.setTimeout(
+      () => saveSynologySyncSelection(),
+      600
+    );
+  },
+  { deep: true }
+);
+
+// When the user leaves the Immich/Synology config (sub-tab or the whole Data
+// Sources tab) with unsynced selection changes, offer to sync now.
+const maybePromptSync = async (source: 'immich' | 'synology_photos') => {
+  const dirty = source === 'immich' ? immichSyncDirty : synologySyncDirty;
+  if (!dirty.value) return;
+  dirty.value = false; // ask once
+  const ok = await confirmDialog.value.open(
+    'You changed which albums to sync. Sync now to apply the changes?'
+  );
+  if (!ok) return;
+  if (source === 'immich') await syncImmich();
+  else await syncSynology();
+};
+// When the user leaves a topic source (Unsplash/Pexels) after changing topics,
+// offer to sync now to import photos for them.
+const maybePromptTopicSync = async (source: string) => {
+  if (!topicSyncDirty[source]) return;
+  topicSyncDirty[source] = false; // ask once
+  const ok = await confirmDialog.value.open(
+    'You changed topics. Sync now to import photos for them?'
+  );
+  if (!ok) return;
+  await syncTopicSource(source);
+};
+watch(sourceTab, (_newVal, oldVal) => {
+  if (oldVal === 'immich') maybePromptSync('immich');
+  if (oldVal === 'synology_photos') maybePromptSync('synology_photos');
+  if (oldVal === 'unsplash' || oldVal === 'pexels')
+    maybePromptTopicSync(oldVal);
+});
+watch(activeMainTab, (_newVal, oldVal) => {
+  if (oldVal === 'datasources') {
+    maybePromptSync('immich');
+    maybePromptSync('synology_photos');
+    maybePromptTopicSync('unsplash');
+    maybePromptTopicSync('pexels');
+  }
+});
+
+const immichMemoryModeOptions = [
+  { title: 'All years', value: 'all' },
+  { title: 'Most recent year only', value: 'latest' },
 ];
 
 const autoSyncIntervalOptions = [
@@ -3032,15 +4466,61 @@ const autoSyncIntervalOptions = [
   { title: 'Every 24 hours', value: 1440 },
 ];
 
-// Helper to show snackbar
-const showMessage = (msg: string, isError = false) => {
-  snackbar.message = msg;
-  snackbar.color = isError ? 'error' : 'success';
-  snackbar.show = true;
+// Delete all photos for a given image source. Also disables that source's
+// album sync on the backend, so refresh the sync-selection UI afterwards.
+const deletingAllPhotos = ref(false);
+const deleteAllPhotosForSource = async (
+  source: 'immich' | 'synology_photos' | 'google_photos' | 'gallery'
+) => {
+  if (
+    !(await confirmDialog.value.open(
+      'Delete all photos for this source? This also turns off its album sync.'
+    ))
+  )
+    return;
+
+  deletingAllPhotos.value = true;
+  try {
+    await api.delete('/gallery/photos?source=' + source);
+
+    if (source === 'immich') {
+      await immichStore.fetchSyncedAlbums();
+      try {
+        await immichStore.fetchAlbums();
+        form.immich_albums = immichStore.albums;
+      } catch (e) {
+        // Non-fatal: keep whatever albums we already have.
+      }
+      applySyncedAlbumState();
+      await immichStore.fetchCount();
+    } else if (source === 'synology_photos') {
+      await synologyStore.fetchSyncedAlbums();
+      try {
+        await synologyStore.fetchAlbums();
+        form.albums = synologyStore.albums;
+      } catch (e) {
+        // Non-fatal.
+      }
+      applySynologySyncedAlbumState();
+      await synologyStore.fetchCount();
+    }
+
+    showMessage('All photos deleted.');
+
+    // Refresh the gallery view (photos + album chips).
+    galleryStore.triggerRefresh();
+  } catch (e: any) {
+    showMessage(
+      'Failed to delete photos: ' + (e.response?.data?.error || e.message),
+      true
+    );
+  } finally {
+    deletingAllPhotos.value = false;
+  }
 };
 
 onMounted(async () => {
-  loadSessions();
+  restoreGalleryTabFromHash();
   await store.fetchSettings();
   Object.assign(form, {
     Orientation: store.settings.orientation || 'landscape',
@@ -3080,14 +4560,32 @@ onMounted(async () => {
     immich_url: store.settings.immich_url || '',
     immich_api_key: store.settings.immich_api_key || '',
     immich_source_mode: store.settings.immich_source_mode || 'album',
+    immich_memory_mode: store.settings.immich_memory_mode || 'all',
     immich_album_id: store.settings.immich_album_id || '',
     immich_auto_sync_enabled:
       store.settings.immich_auto_sync_enabled === 'true',
     immich_auto_sync_interval_minutes: parseInt(
       store.settings.immich_auto_sync_interval_minutes || '60'
     ),
+    device_image_base_url: store.settings.device_image_base_url || '',
     openai_api_key: store.settings.openai_api_key || '',
     google_api_key: store.settings.google_api_key || '',
+    unsplash_api_key: store.settings.unsplash_api_key || '',
+    pexels_api_key: store.settings.pexels_api_key || '',
+    unsplash_auto_sync_enabled:
+      store.settings.unsplash_auto_sync_enabled === 'true',
+    unsplash_auto_sync_interval_minutes: parseInt(
+      store.settings.unsplash_auto_sync_interval || '60'
+    ),
+    unsplash_randomize_results:
+      store.settings.unsplash_randomize_results === 'true',
+    pexels_auto_sync_enabled:
+      store.settings.pexels_auto_sync_enabled === 'true',
+    pexels_auto_sync_interval_minutes: parseInt(
+      store.settings.pexels_auto_sync_interval || '60'
+    ),
+    pexels_randomize_results:
+      store.settings.pexels_randomize_results === 'true',
   });
 
   // Load cached albums if available
@@ -3100,14 +4598,27 @@ onMounted(async () => {
   }
 
   // Run independent fetches in parallel
-  const parallelFetches: Promise<void>[] = [
-    authStore.fetchTokens(),
-    loadDevices(),
-  ];
+  const parallelFetches: Promise<void>[] = [loadDevices()];
 
-  // Fetch Synology photo count if connected
+  // Fetch Synology photo count + albums if connected
   if (form.synology_sid) {
-    parallelFetches.push(synologyStore.fetchCount());
+    parallelFetches.push(
+      (async () => {
+        await synologyStore.fetchCount();
+        try {
+          await synologyStore.fetchAlbums();
+          form.albums = synologyStore.albums;
+        } catch (e) {
+          // Non-fatal: use cached albums until user refreshes
+        }
+        try {
+          await synologyStore.fetchSyncedAlbums();
+          applySynologySyncedAlbumState();
+        } catch (e) {
+          // Non-fatal: checkboxes start unchecked until user refreshes
+        }
+      })()
+    );
   }
 
   // Fetch Immich photo count and albums if connected
@@ -3122,6 +4633,30 @@ onMounted(async () => {
         } catch (e) {
           // Non-fatal: album names will be shown as UUIDs until user clicks Refresh
         }
+        try {
+          await immichStore.fetchSyncedAlbums();
+          applySyncedAlbumState();
+        } catch (e) {
+          // Non-fatal: checkboxes start unchecked until user refreshes
+        }
+      })()
+    );
+  }
+
+  // Topic-source connection state (key present => connected).
+  unsplashConnected.value = !!store.settings.unsplash_api_key;
+  pexelsConnected.value = !!store.settings.pexels_api_key;
+
+  // Topic sources: load counts + synced topics (best-effort, non-blocking).
+  for (const source of Object.keys(topicStores)) {
+    parallelFetches.push(
+      (async () => {
+        try {
+          await topicStores[source].fetchCount();
+          await topicStores[source].fetchSyncedAlbums();
+        } catch (e) {
+          // Non-fatal
+        }
       })()
     );
   }
@@ -3133,11 +4668,11 @@ onMounted(async () => {
   const tab = params.get('tab');
   const source = params.get('source');
 
-  if (tab) {
+  if (tab && tab !== 'datasources') {
     activeMainTab.value = tab;
   }
   if (source) {
-    activeDataSourceTab.value = source;
+    sourceTab.value = source === 'google' ? 'google_photos' : source;
   }
 
   // Clean up URL if params were present
@@ -3175,6 +4710,7 @@ const saveSettingsInternal = async () => {
     immich_url: form.immich_url,
     immich_api_key: form.immich_api_key,
     immich_source_mode: form.immich_source_mode,
+    immich_memory_mode: form.immich_memory_mode,
     immich_album_id: form.immich_album_id,
     immich_auto_sync_enabled: String(form.immich_auto_sync_enabled),
     immich_auto_sync_interval_minutes: String(
@@ -3182,6 +4718,17 @@ const saveSettingsInternal = async () => {
     ),
     openai_api_key: form.openai_api_key,
     google_api_key: form.google_api_key,
+    unsplash_api_key: form.unsplash_api_key,
+    pexels_api_key: form.pexels_api_key,
+    unsplash_auto_sync_enabled: String(form.unsplash_auto_sync_enabled),
+    unsplash_auto_sync_interval: String(
+      form.unsplash_auto_sync_interval_minutes
+    ),
+    unsplash_randomize_results: String(form.unsplash_randomize_results),
+    pexels_auto_sync_enabled: String(form.pexels_auto_sync_enabled),
+    pexels_auto_sync_interval: String(form.pexels_auto_sync_interval_minutes),
+    pexels_randomize_results: String(form.pexels_randomize_results),
+    device_image_base_url: form.device_image_base_url,
   });
 };
 
@@ -3258,6 +4805,8 @@ const testSynology = async () => {
     form.synology_otp_code = '';
     // Store updates settings internally, but we need to update form
     form.synology_sid = store.settings.synology_sid;
+    // Auto-load the album list so the user can pick albums right away.
+    await loadAlbums();
   } catch (e: any) {
     const err = e.response?.data?.error || 'Unknown error';
     if (err.includes('code: 403')) {
@@ -3281,6 +4830,8 @@ const logoutSynology = async () => {
   try {
     await synologyStore.logout();
     form.synology_sid = '';
+    form.albums = [];
+    synologySyncAlbumIds.value = [];
     showMessage('Logged out from Synology.');
   } catch (e) {
     showMessage('Error logging out: ' + e, true);
@@ -3292,6 +4843,12 @@ const loadAlbums = async () => {
   try {
     await synologyStore.fetchAlbums();
     form.albums = synologyStore.albums;
+    try {
+      await synologyStore.fetchSyncedAlbums();
+      applySynologySyncedAlbumState();
+    } catch (e) {
+      // Non-fatal
+    }
     showMessage('Albums loaded!');
   } catch (e: any) {
     if (
@@ -3311,11 +4868,38 @@ const loadAlbums = async () => {
   }
 };
 
+const saveSynologySyncSelection = async () => {
+  savingSynologySyncSelection.value = true;
+  try {
+    await synologyStore.saveSyncAlbums(synologySyncAlbumIds.value);
+    applySynologySyncedAlbumState();
+    // Selection persisted only; no import here (manual Sync / prompt triggers it).
+  } catch (e: any) {
+    showMessage(
+      'Failed to save sync selection: ' +
+        (e.response?.data?.error || e.message),
+      true
+    );
+  } finally {
+    savingSynologySyncSelection.value = false;
+  }
+};
+
 const syncSynology = async () => {
   await saveSettingsInternal();
   try {
     await synologyStore.sync();
-    showMessage('Sync started/completed successfully!');
+    synologySyncDirty.value = false;
+    showMessage('Sync started — importing in the background.');
+    galleryStore.triggerRefresh();
+    // Refresh the gallery preview above so the freshly synced photos show.
+    // Switching the source triggers a fetch; if it's already on synology the
+    // watch won't fire, so refetch explicitly.
+    if (sourceTab.value === 'synology_photos') {
+      await galleryStore.fetchPhotos();
+    } else {
+      sourceTab.value = 'synology_photos';
+    }
   } catch (e: any) {
     if (e.response && e.response.status === 401) {
       showMessage('Session expired. Please reconnect.', true);
@@ -3328,25 +4912,9 @@ const syncSynology = async () => {
   }
 };
 
-const clearSynology = async () => {
-  if (
-    !(await confirmDialog.value.open(
-      'Are you sure you want to clear all Synology photo references? Local files will not be deleted.'
-    ))
-  )
-    return;
-
-  try {
-    await api.post('/synology/clear');
-    showMessage('All Synology photos cleared from database.');
-    await synologyStore.fetchCount();
-  } catch (e: any) {
-    showMessage(
-      'Clear Failed: ' + (e.response?.data?.error || e.message),
-      true
-    );
-  }
-};
+// Clear All Photos = delete photos AND turn off album sync (so they don't
+// re-import) — same behavior as the per-source Delete All.
+const clearSynology = () => deleteAllPhotosForSource('synology_photos');
 
 const testImmich = async () => {
   await saveSettingsInternal();
@@ -3354,12 +4922,27 @@ const testImmich = async () => {
     await immichStore.testConnection();
     immichConnected.value = true;
     showMessage('Connection Successful!');
+    // Auto-load the album list so the user can pick albums right away.
+    await loadImmichAlbums();
   } catch (e: any) {
     showMessage(
       'Connection Failed: ' + (e.response?.data?.error || e.message),
       true
     );
   }
+};
+
+const disconnectTelegram = async () => {
+  if (
+    !(await confirmDialog.value.open(
+      'Disconnect the Telegram bot? You can reconnect by entering a token again.'
+    ))
+  )
+    return;
+  form.telegram_bot_token = '';
+  form.telegram_push_enabled = false;
+  await saveSettingsInternal();
+  showMessage('Telegram bot disconnected.');
 };
 
 const disconnectImmich = async () => {
@@ -3381,11 +4964,73 @@ const disconnectImmich = async () => {
   showMessage('Disconnected from Immich.');
 };
 
+const connectUnsplash = async () => {
+  // The test endpoint validates the currently-saved key, so persist first.
+  await saveSettingsInternal();
+  try {
+    await api.post('/unsplash/test');
+    unsplashConnected.value = true;
+    showMessage('Connection Successful!');
+  } catch (e: any) {
+    showMessage(
+      'Connection Failed: ' + (e.response?.data?.error || e.message),
+      true
+    );
+  }
+};
+
+const disconnectUnsplash = async () => {
+  if (
+    !(await confirmDialog.value.open(
+      'Are you sure you want to disconnect Unsplash?'
+    ))
+  )
+    return;
+  form.unsplash_api_key = '';
+  await saveSettingsInternal();
+  unsplashConnected.value = false;
+  showMessage('Disconnected from Unsplash.');
+};
+
+const connectPexels = async () => {
+  // The test endpoint validates the currently-saved key, so persist first.
+  await saveSettingsInternal();
+  try {
+    await api.post('/pexels/test');
+    pexelsConnected.value = true;
+    showMessage('Connection Successful!');
+  } catch (e: any) {
+    showMessage(
+      'Connection Failed: ' + (e.response?.data?.error || e.message),
+      true
+    );
+  }
+};
+
+const disconnectPexels = async () => {
+  if (
+    !(await confirmDialog.value.open(
+      'Are you sure you want to disconnect Pexels?'
+    ))
+  )
+    return;
+  form.pexels_api_key = '';
+  await saveSettingsInternal();
+  pexelsConnected.value = false;
+  showMessage('Disconnected from Pexels.');
+};
+
 const loadImmichAlbums = async () => {
   await saveSettingsInternal();
   try {
     await immichStore.fetchAlbums();
     form.immich_albums = immichStore.albums;
+    try {
+      await immichStore.fetchSyncedAlbums();
+      applySyncedAlbumState();
+    } catch (e) {
+      // Non-fatal
+    }
     showMessage('Albums loaded!');
   } catch (e: any) {
     showMessage(
@@ -3395,11 +5040,45 @@ const loadImmichAlbums = async () => {
   }
 };
 
+const saveSyncSelection = async () => {
+  savingSyncSelection.value = true;
+  try {
+    // Persist the memory-mode setting alongside the sync selection.
+    await saveSettingsInternal();
+    await immichStore.saveSyncAlbums({
+      album_ids: syncAlbumIds.value,
+      favorites: syncFavorites.value,
+      all: syncAll.value,
+      memories: syncMemories.value,
+    });
+    applySyncedAlbumState();
+    // Selection persisted only; no import here (manual Sync / prompt triggers it).
+  } catch (e: any) {
+    showMessage(
+      'Failed to save sync selection: ' +
+        (e.response?.data?.error || e.message),
+      true
+    );
+  } finally {
+    savingSyncSelection.value = false;
+  }
+};
+
 const syncImmich = async () => {
   await saveSettingsInternal();
   try {
     await immichStore.sync();
-    showMessage('Sync completed successfully!');
+    immichSyncDirty.value = false;
+    showMessage('Sync started — importing in the background.');
+    galleryStore.triggerRefresh();
+    // Refresh the gallery preview above so the freshly synced photos show.
+    // Switching the source triggers a fetch; if it's already on immich the
+    // watch won't fire, so refetch explicitly.
+    if (sourceTab.value === 'immich') {
+      await galleryStore.fetchPhotos();
+    } else {
+      sourceTab.value = 'immich';
+    }
   } catch (e: any) {
     showMessage(
       'Sync Failed: ' + (e.response?.data?.error || 'Unknown error'),
@@ -3408,188 +5087,86 @@ const syncImmich = async () => {
   }
 };
 
-const clearImmich = async () => {
+const clearImmich = () => deleteAllPhotosForSource('immich');
+
+// --- Topic sources (Unsplash / Pexels) ---
+// Replace the synced topic set, then offer to sync (topics have no photos
+// until imported).
+const saveTopics = async (source: string, topics: string[]) => {
+  const st = topicStores[source];
+  try {
+    await st.setSyncTopics(topics);
+    topicSyncDirty[source] = true;
+  } catch (e: any) {
+    showMessage(
+      'Failed to save topics: ' + (e.response?.data?.error || e.message),
+      true
+    );
+  }
+};
+
+const syncTopicSource = async (source: string) => {
+  const st = topicStores[source];
+  topicSyncDirty[source] = false;
+  await saveSettingsInternal();
+  try {
+    await st.sync();
+    showMessage('Sync started — importing in the background.');
+    galleryStore.triggerRefresh();
+    if (sourceTab.value === source) {
+      await galleryStore.fetchPhotos();
+    } else {
+      sourceTab.value = source;
+    }
+  } catch (e: any) {
+    showMessage(
+      'Sync Failed: ' + (e.response?.data?.error || 'Unknown error'),
+      true
+    );
+  }
+};
+
+const clearTopicSource = async (source: string) => {
+  const st = topicStores[source];
   if (
     !(await confirmDialog.value.open(
-      'Are you sure you want to clear all Immich photo references?'
+      'Delete all photos for this source? Your topics stay, but their photos are removed.'
     ))
   )
     return;
   try {
-    await api.post('/immich/clear');
-    showMessage('All Immich photos cleared from database.');
-    await immichStore.fetchCount();
+    await st.clear();
+    showMessage('All photos deleted.');
+    galleryStore.triggerRefresh();
   } catch (e: any) {
     showMessage(
-      'Clear Failed: ' + (e.response?.data?.error || e.message),
+      'Failed to delete photos: ' + (e.response?.data?.error || e.message),
       true
     );
-  }
-};
-
-// Token Management
-const generatedToken = ref('');
-const newTokenName = ref('');
-const newTokenDeviceId = ref<number | null>(null);
-
-const copyToken = async () => {
-  try {
-    await navigator.clipboard.writeText(generatedToken.value);
-    showMessage('Token copied to clipboard!');
-  } catch (e) {
-    // Fallback for non-secure contexts could be implemented here given time
-    showMessage(
-      'Failed to copy token automatically. Please copy manually.',
-      true
-    );
-  }
-};
-
-// Password Change
-const showAccountForm = ref(false);
-const accountForm = reactive({
-  oldPassword: '',
-  newUsername: '',
-  newPassword: '',
-  confirmPassword: '',
-});
-
-const generateToken = async () => {
-  if (!newTokenName.value) {
-    showMessage('Please enter a name for the token.', true);
-    return;
-  }
-  try {
-    const token = await authStore.generateToken(
-      newTokenName.value,
-      newTokenDeviceId.value ?? undefined
-    );
-    generatedToken.value = token;
-    newTokenName.value = '';
-    newTokenDeviceId.value = null;
-    showMessage('Token generated!');
-  } catch (e: any) {
-    showMessage(
-      'Failed to generate token: ' + (e.response?.data?.error || e.message),
-      true
-    );
-  }
-};
-
-const updateTokenDevice = async (tokenId: number, deviceId: number | null) => {
-  try {
-    await authStore.updateTokenDevice(tokenId, deviceId);
-    showMessage('Token device binding updated');
-  } catch (e: any) {
-    showMessage(
-      'Failed to update token: ' + (e.response?.data?.error || e.message),
-      true
-    );
-  }
-};
-
-const revokeToken = async (id: number) => {
-  if (
-    !(await confirmDialog.value.open(
-      'Revoke this token? Device will lose access.'
-    ))
-  )
-    return;
-  try {
-    await authStore.revokeToken(id);
-    showMessage('Token revoked.');
-  } catch (e: any) {
-    showMessage('Failed: ' + e.message, true);
-  }
-};
-
-const updateAccountSettings = async () => {
-  if (!accountForm.oldPassword) {
-    showMessage('Current password is required.', true);
-    return;
-  }
-  if (!accountForm.newUsername && !accountForm.newPassword) {
-    showMessage('Please provide a new username or password.', true);
-    return;
-  }
-  if (accountForm.newPassword) {
-    if (accountForm.newPassword !== accountForm.confirmPassword) {
-      showMessage('New passwords do not match.', true);
-      return;
-    }
-    if (accountForm.newPassword.length < 6) {
-      showMessage('New password must be at least 6 characters.', true);
-      return;
-    }
-  }
-
-  try {
-    await updateAccount(
-      accountForm.oldPassword,
-      accountForm.newUsername,
-      accountForm.newPassword
-    );
-    accountForm.oldPassword = '';
-    accountForm.newUsername = '';
-    accountForm.newPassword = '';
-    accountForm.confirmPassword = '';
-    showMessage('Account updated successfully!');
-  } catch (e: any) {
-    showMessage('Failed: ' + (e.response?.data?.error || e.message), true);
-  }
-};
-
-// Sessions
-const sessions = ref<any[]>([]);
-
-const loadSessions = async () => {
-  try {
-    sessions.value = await listSessions();
-  } catch (e) {
-    console.error('Failed to load sessions', e);
-  }
-};
-
-const revokeSessionHandler = async (id: number) => {
-  if (!confirm('Are you sure you want to revoke this session?')) return;
-  try {
-    await revokeSession(id);
-    await loadSessions();
-    showMessage('Session revoked');
-  } catch (e: any) {
-    showMessage('Failed: ' + (e.response?.data?.error || e.message), true);
   }
 };
 
 // Get image endpoint URL
 // Always use direct add-on port for device access (ESP32 devices access directly, not via ingress)
-const getImageUrl = (source: string) => {
-  const hostname = window.location.hostname;
+// Base URL derived from the browser's location — what /image resolves to
+// when no explicit "Server URL for devices" is set. Shown as the field
+// placeholder so the user sees the effective value.
+const derivedServerBase = computed(() => {
   const protocol = window.location.protocol;
+  const hostname = window.location.hostname;
   // Use configurable port via env var, default to 9607 for production
   const addonPort = import.meta.env.VITE_ADDON_PORT || '9607';
-  return `${protocol}//${hostname}:${addonPort}/image/${source}`;
-};
+  return `${protocol}//${hostname}:${addonPort}`;
+});
 
-// Copy to clipboard
-const copyToClipboard = async (text: string) => {
-  try {
-    await navigator.clipboard.writeText(text);
-    showMessage('URL copied to clipboard!');
-  } catch (e) {
-    showMessage('Failed to copy to clipboard', true);
-  }
-};
-
-const getDeviceFromUA = (ua: string) => {
-  if (!ua) return 'Unknown Device';
-  if (ua.includes('iPhone')) return 'iPhone';
-  if (ua.includes('iPad')) return 'iPad';
-  if (ua.includes('Macintosh')) return 'Mac';
-  if (ua.includes('Windows')) return 'Windows';
-  if (ua.includes('Android')) return 'Android';
-  if (ua.includes('Linux')) return 'Linux';
-  return 'Other Device';
+const getImageUrl = (source?: string) => {
+  // Prefer the admin-configured device-facing base URL. The browser's
+  // window.location is unreliable for the URL pushed to frames (Tailscale,
+  // ingress, reverse proxies all change the hostname the browser used).
+  const origin =
+    (form.device_image_base_url || '').trim().replace(/\/+$/, '') ||
+    derivedServerBase.value;
+  return `${origin}/image${source ? '/' + source : ''}`;
 };
 </script>
 

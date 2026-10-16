@@ -71,9 +71,27 @@ export interface Device {
   ai_prompt?: string;
   layout?: string;
   display_mode?: string;
+  background_color?: string;
+  battery_level?: number;
+  // Whether a password is stored for a frame whose own HTTP API is
+  // protected. The password itself is never returned.
+  http_password_set?: boolean;
+  // The frame refused the server's last request for want of the right
+  // password, so nothing the server does with it works until the user
+  // enters the frame's password. auth_failed_at is when the refusals
+  // started; it stays put while they last.
+  auth_required?: boolean;
+  auth_failed_at?: string | null;
+  battery_reported_at?: string;
+  firmware_version?: string;
   show_calendar?: boolean;
   calendar_id?: string;
   date_format?: string;
+  source?: string;
+  board_name?: string;
+  // Display color model reported by the device: "gc16" (16-level grayscale),
+  // "spectra6" (6-color), or undefined for legacy firmware (treated as color).
+  display_type?: string;
   created_at: string;
   model?: any;
 }
@@ -97,8 +115,63 @@ export const addDevice = async (params: {
   show_calendar?: boolean;
   calendar_id?: string;
   date_format?: string;
+  // Only needed when the frame requires a password on its own HTTP API.
+  http_password?: string;
 }) => {
   const response = await api.post('devices', params);
+  return response.data;
+};
+
+// What the server reports after storing (or forgetting) a frame password.
+// verified: the frame confirmed it. When it could not -- asleep, locked out,
+// not asking for a password right now -- the password is stored anyway and
+// warning says why; it is checked on the frame's next wake. A password the
+// frame rejects is not stored: the request fails with a 409 carrying
+// FRAME_AUTH_REQUIRED_CODE (see utils/frameAuth.ts).
+export interface StoredFramePassword {
+  http_password_set: boolean;
+  verified: boolean;
+  auth_required: boolean;
+  auth_failed_at: string | null;
+  warning?: string;
+}
+
+// Stores (or clears, with "") the password a frame requires on its own HTTP
+// API, after the server checks it against the frame. Write-only: the server
+// reports only http_password_set.
+export const setDeviceHttpPassword = async (
+  id: number,
+  httpPassword: string
+): Promise<StoredFramePassword> => {
+  const response = await api.put(`/devices/${id}/http-password`, {
+    http_password: httpPassword,
+  });
+  return response.data;
+};
+
+// Changes the password on the frame itself (unlike setDeviceHttpPassword,
+// which only records one the frame already has). The server signs in to the
+// frame with the stored password, sets the new one there and then stores it.
+// "" turns the frame's password off. On failure nothing is changed.
+// host is the one the user sees; the server refuses if the saved host has
+// since been changed elsewhere, rather than change another frame.
+export const changeFramePassword = async (
+  id: number,
+  password: string,
+  host: string
+): Promise<{
+  http_password_set: boolean;
+  verified: boolean;
+  // The refusal flag after the change: cleared, the old password being
+  // gone with whatever it was refused for.
+  auth_required: boolean;
+  auth_failed_at: string | null;
+  warning?: string;
+}> => {
+  const response = await api.post(`/devices/${id}/frame-password`, {
+    password,
+    host,
+  });
   return response.data;
 };
 
@@ -123,7 +196,9 @@ export const updateDevice = async (
   displayMode?: string,
   showCalendar?: boolean,
   calendarId?: string,
-  dateFormat?: string
+  dateFormat?: string,
+  source?: string,
+  backgroundColor?: string
 ) => {
   const response = await api.put(`/devices/${id}`, {
     name,
@@ -143,6 +218,8 @@ export const updateDevice = async (
     show_calendar: showCalendar || false,
     calendar_id: calendarId || '',
     date_format: dateFormat || '',
+    source: source || '',
+    background_color: backgroundColor || '',
   });
   return response.data;
 };
@@ -247,6 +324,13 @@ export const listSessions = async () => {
 
 export const revokeSession = async (id: number) => {
   const response = await api.delete(`/auth/sessions/${id}`);
+  return response.data;
+};
+
+// Regenerate the JWT signing secret. Invalidates ALL tokens (the caller is
+// signed out and every device token must be regenerated).
+export const rotateJWTSecret = async () => {
+  const response = await api.post('auth/rotate-secret');
   return response.data;
 };
 

@@ -42,19 +42,71 @@
         </div>
       </v-container>
     </v-main>
+
+    <!-- Same style as the device webapp's version footer -->
+    <v-footer
+      v-if="serverVersion"
+      app
+      class="text-center d-flex justify-center"
+    >
+      <span class="text-body-2 text-grey">
+        ESP32 PhotoFrame Server {{ serverVersion }}
+      </span>
+    </v-footer>
+
+    <!-- The one prompt for a frame's password, shared via
+         useFramePasswordPrompt() the way the snackbar is. Only while logged
+         in: it names a device and may hold a password typed for it. -->
+    <FramePasswordPrompt v-if="authStore.isLoggedIn" />
+
+    <!-- Global snackbar shared via useSnackbar() -->
+    <v-snackbar
+      v-model="snackbar.show"
+      :color="snackbar.color"
+      :timeout="3000"
+      location="bottom right"
+    >
+      {{ snackbar.message }}
+      <template v-slot:actions>
+        <v-btn variant="text" @click="snackbar.show = false">Close</v-btn>
+      </template>
+    </v-snackbar>
   </v-app>
 </template>
 
 <script setup lang="ts">
-import { onMounted } from 'vue';
+import { onMounted, ref, watch } from 'vue';
 import Settings from './components/Settings.vue';
 import Login from './components/Login.vue';
 import Setup from './components/Setup.vue';
+import FramePasswordPrompt from './components/FramePasswordPrompt.vue';
 import { useAuthStore } from './stores/auth';
+import { useSnackbar } from './composables/useSnackbar';
+import { useFramePasswordPrompt } from './composables/useFramePasswordPrompt';
+import { getStatus } from './api';
 
 const authStore = useAuthStore();
+const { snackbar } = useSnackbar();
+const { reset: resetFramePasswordPrompt } = useFramePasswordPrompt();
+const serverVersion = ref('');
+
+// A logout drops the prompt with whatever it held. Its state outlives the
+// components (it is shared like the snackbar's), so unmounting it above is
+// not enough: it would come back, as it was, at the next login.
+watch(
+  () => authStore.isLoggedIn,
+  (loggedIn) => {
+    if (!loggedIn) resetFramePasswordPrompt();
+  }
+);
 
 onMounted(async () => {
+  try {
+    const status = await getStatus();
+    serverVersion.value = status.version || '';
+  } catch {
+    // Non-fatal: just omit the footer.
+  }
   await authStore.checkStatus();
 });
 </script>

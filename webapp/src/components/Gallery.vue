@@ -3,7 +3,9 @@
     <!-- Gallery Content -->
     <div>
       <!-- Header with Stats and Actions -->
-      <div class="d-flex justify-space-between align-center mb-4">
+      <div
+        class="d-flex flex-column flex-sm-row justify-space-between align-start align-sm-center ga-2 mb-4"
+      >
         <div>
           <h2 class="text-h6 text-capitalize">
             {{ galleryStore.source.replace('_', ' ') }} Gallery
@@ -14,18 +16,20 @@
             }}
             total
           </div>
-        </div>
-        <div class="d-flex gap-2 ga-2">
-          <v-btn
-            v-if="galleryStore.totalPhotos > 0"
-            color="error"
-            variant="flat"
-            height="40"
-            prepend-icon="mdi-delete"
-            @click="requestDeleteAll"
+          <div
+            v-if="syncing"
+            class="text-caption text-primary d-flex align-center ga-1 mt-1"
           >
-            Delete All
-          </v-btn>
+            <v-progress-circular
+              indeterminate
+              size="14"
+              width="2"
+              color="primary"
+            ></v-progress-circular>
+            Syncing…
+          </div>
+        </div>
+        <div class="d-flex flex-wrap ga-2">
           <v-btn
             v-if="galleryStore.source === 'gallery'"
             color="primary"
@@ -78,6 +82,45 @@
       >
         {{ galleryStore.importMessage }}
       </v-alert>
+
+      <!-- Last sync failure (from the source's sync-status endpoint) -->
+      <v-alert
+        v-if="syncError && syncError !== dismissedSyncError && !syncing"
+        type="error"
+        variant="tonal"
+        class="mb-4"
+        density="compact"
+        closable
+        @click:close="dismissedSyncError = syncError"
+      >
+        Last sync failed: {{ syncError }}
+      </v-alert>
+
+      <!-- Album Chips (Immich / Synology) -->
+      <div
+        v-if="showAlbumChips && albumChips.length > 0"
+        class="d-flex align-center flex-wrap ga-2 mb-4"
+      >
+        <v-chip
+          :color="galleryStore.album === null ? 'primary' : undefined"
+          :variant="galleryStore.album === null ? 'flat' : 'outlined'"
+          @click="selectAlbum(null)"
+        >
+          All
+        </v-chip>
+        <v-chip
+          v-for="album in albumChips"
+          :key="album.id"
+          :color="galleryStore.album === album.id ? 'primary' : undefined"
+          :variant="galleryStore.album === album.id ? 'flat' : 'outlined'"
+          @click="selectAlbum(album.id)"
+        >
+          {{ album.name
+          }}<span v-if="album.asset_count != null" class="ml-1 text-caption"
+            >({{ album.asset_count }})</span
+          >
+        </v-chip>
+      </div>
 
       <!-- Loading Spinner -->
       <div
@@ -164,38 +207,6 @@
         </v-card>
       </v-dialog>
 
-      <!-- Delete All Dialog -->
-      <v-dialog v-model="deleteAllDialog.show" max-width="400">
-        <v-card>
-          <v-card-title>
-            <v-icon icon="mdi-delete-sweep" color="error" class="mr-2" />
-            Delete All Photos?
-          </v-card-title>
-          <v-card-text>
-            Delete all
-            <strong>{{ galleryStore.totalPhotos }}</strong> photo{{
-              galleryStore.totalPhotos === 1 ? '' : 's'
-            }}
-            in the
-            <strong>{{ galleryStore.source.replace('_', ' ') }}</strong>
-            gallery? This cannot be undone.
-          </v-card-text>
-          <v-card-actions>
-            <v-spacer />
-            <v-btn variant="text" @click="deleteAllDialog.show = false">
-              Cancel
-            </v-btn>
-            <v-btn
-              color="error"
-              :loading="deleteAllDialog.loading"
-              @click="confirmDeleteAll"
-            >
-              Delete
-            </v-btn>
-          </v-card-actions>
-        </v-card>
-      </v-dialog>
-
       <!-- Push Dialog -->
       <v-dialog v-model="pushDialog.show" max-width="400">
         <v-card>
@@ -209,12 +220,21 @@
             </div>
             <div v-else>
               <v-radio-group v-model="pushDialog.selectedDevice" hide-details>
-                <v-radio
-                  v-for="dev in devices"
-                  :key="dev.id"
-                  :label="`${dev.name} (${dev.host})`"
-                  :value="dev.id"
-                ></v-radio>
+                <v-radio v-for="dev in devices" :key="dev.id" :value="dev.id">
+                  <template #label>
+                    {{ dev.name }} ({{ dev.host }})
+                    <v-chip
+                      v-if="dev.auth_required"
+                      size="x-small"
+                      color="warning"
+                      variant="flat"
+                      class="ml-2"
+                      prepend-icon="mdi-lock-alert"
+                    >
+                      Password required
+                    </v-chip>
+                  </template>
+                </v-radio>
               </v-radio-group>
 
               <v-checkbox
@@ -296,6 +316,14 @@
             Open the <b>Immich</b> tab under Data Sources below and click
             <b>Sync Now</b> to import photos.
           </span>
+          <span v-else-if="galleryStore.source === 'unsplash'">
+            Open the <b>Unsplash</b> tab under Data Sources below, add some
+            topics and click <b>Sync Now</b> to import photos.
+          </span>
+          <span v-else-if="galleryStore.source === 'pexels'">
+            Open the <b>Pexels</b> tab under Data Sources below, add some topics
+            and click <b>Sync Now</b> to import photos.
+          </span>
         </p>
         <v-btn
           v-if="galleryStore.source === 'google_photos'"
@@ -367,13 +395,126 @@
 </style>
 
 <script setup lang="ts">
-import { onMounted, ref, reactive } from 'vue';
+import { onMounted, onUnmounted, ref, reactive, computed, watch } from 'vue';
 import { useAuthStore } from '../stores/auth';
 import { useGalleryStore } from '../stores/gallery';
-import { listDevices, pushToDevice, type Device } from '../api';
+import { api, listDevices, pushToDevice, type Device } from '../api';
+import { useFramePasswordPrompt } from '../composables/useFramePasswordPrompt';
+import { isFrameAuthRefusal } from '../utils/frameAuth';
+import { getApiError } from '../utils/errors';
 
 const authStore = useAuthStore();
 const galleryStore = useGalleryStore();
+const { promptFramePassword } = useFramePasswordPrompt();
+
+// Album chips (only shown for Immich / Synology sources).
+const albumChips = ref<any[]>([]);
+
+// Topic-based sources whose synced topics behave exactly like albums.
+const TOPIC_SOURCES = ['unsplash', 'pexels'];
+
+const showAlbumChips = computed(
+  () =>
+    galleryStore.source === 'immich' ||
+    galleryStore.source === 'synology_photos' ||
+    TOPIC_SOURCES.includes(galleryStore.source)
+);
+
+const fetchAlbumChips = async () => {
+  if (!showAlbumChips.value) {
+    albumChips.value = [];
+    return;
+  }
+  try {
+    const res = await api.get(
+      `/albums?source=${galleryStore.source}&synced=true`
+    );
+    // Only show albums that currently have photos — hide ones emptied upstream.
+    albumChips.value = (res.data || []).filter(
+      (a: any) => (a.asset_count ?? 0) > 0
+    );
+  } catch (e) {
+    console.error('Failed to fetch album chips', e);
+    albumChips.value = [];
+  }
+};
+
+const selectAlbum = (id: number | null) => {
+  galleryStore.setAlbum(id);
+};
+
+// When the source tab changes, reset album selection and refetch chips.
+watch(
+  () => galleryStore.source,
+  () => {
+    prevSyncing = false;
+    syncError.value = '';
+    dismissedSyncError.value = '';
+    fetchAlbumChips();
+    checkSyncStatus();
+  }
+);
+
+// --- Auto-refresh while a background sync is running ---
+const syncing = ref(false);
+// Failure message of the source's most recent sync run ("" on success), from
+// the sync-status endpoint. Without it a failed sync silently looks like
+// "0 new photos" (issue #44). Dismissing hides that message until it changes.
+const syncError = ref('');
+const dismissedSyncError = ref('');
+let syncPollTimer: number | null = null;
+let prevSyncing = false;
+
+const syncStatusEndpoint = (): string | null => {
+  if (galleryStore.source === 'immich') return '/immich/sync-status';
+  if (galleryStore.source === 'synology_photos') return '/synology/sync-status';
+  if (TOPIC_SOURCES.includes(galleryStore.source)) {
+    return `/${galleryStore.source}/sync-status`;
+  }
+  return null;
+};
+
+const checkSyncStatus = async () => {
+  const ep = syncStatusEndpoint();
+  if (!ep) {
+    syncing.value = false;
+    prevSyncing = false;
+    syncError.value = '';
+    return;
+  }
+  try {
+    const res = await api.get(ep);
+    const running = !!res.data?.running;
+    syncError.value =
+      typeof res.data?.last_error === 'string' ? res.data.last_error : '';
+    // Refresh while syncing (new photos appear) and once more right after it
+    // finishes, so the gallery + album counts stay current without a manual reload.
+    if (running || prevSyncing) {
+      await galleryStore.fetchPhotos();
+      await fetchAlbumChips();
+    }
+    syncing.value = running;
+    prevSyncing = running;
+  } catch {
+    // ignore transient errors
+  }
+};
+
+// Settings bumps refreshSignal right after a sync/delete is triggered, so we
+// detect it immediately instead of waiting for the next background poll.
+watch(
+  () => galleryStore.refreshSignal,
+  () => {
+    // A sync or delete just happened — refetch immediately (a delete is instant
+    // and has no sync status to poll, so we can't rely on checkSyncStatus alone)...
+    galleryStore.fetchPhotos();
+    fetchAlbumChips();
+    // ...then poll in case a background sync is still importing more photos.
+    syncing.value = true;
+    prevSyncing = true;
+    checkSyncStatus();
+  }
+);
 
 const uploadInput = ref<HTMLInputElement | null>(null);
 
@@ -408,25 +549,6 @@ const confirmDeletePhoto = async () => {
     deleteDialog.photo = null;
   } finally {
     deleteDialog.loading = false;
-  }
-};
-
-const deleteAllDialog = reactive({
-  show: false,
-  loading: false,
-});
-
-const requestDeleteAll = () => {
-  deleteAllDialog.show = true;
-};
-
-const confirmDeleteAll = async () => {
-  deleteAllDialog.loading = true;
-  try {
-    await galleryStore.deleteAllPhotos();
-    deleteAllDialog.show = false;
-  } finally {
-    deleteAllDialog.loading = false;
   }
 };
 
@@ -503,14 +625,25 @@ const confirmPush = async () => {
     galleryStore.importMessage = 'Image pushed to device successfully';
     pushDialog.show = false;
   } catch (e: any) {
-    // Extract error message
-    let msg = 'Failed to push image';
-    if (e.response && e.response.data && e.response.data.error) {
-      msg = e.response.data.error;
-    } else if (e.message) {
-      msg = e.message;
+    if (isFrameAuthRefusal(e)) {
+      // The frame wants its password. The server has just recorded the
+      // refusal: reload the list so its chip shows -- and stays, on "Not
+      // now" -- then ask, and push again once the password is in.
+      pushDialog.loading = false;
+      try {
+        devices.value = await listDevices();
+      } catch {
+        // The chip can wait for the next load; the prompt cannot.
+      }
+      const refused = devices.value.find(
+        (d) => d.id === pushDialog.selectedDevice
+      );
+      if (refused && (await promptFramePassword(refused)).saved) {
+        await confirmPush();
+        return;
+      }
     }
-    pushDialog.error = msg;
+    pushDialog.error = getApiError(e, 'Failed to push image');
     // Keep dialog open to show error
   } finally {
     pushDialog.loading = false;
@@ -529,5 +662,15 @@ onMounted(async () => {
   // store.fetchSettings() is called by parent (Settings.vue) or app init.
   // Calling it here triggers a loading state loop if this component is mounted inside Settings.vue
   galleryStore.fetchPhotos();
+  fetchAlbumChips();
+  checkSyncStatus();
+  syncPollTimer = window.setInterval(checkSyncStatus, 6000);
+});
+
+onUnmounted(() => {
+  if (syncPollTimer != null) {
+    window.clearInterval(syncPollTimer);
+    syncPollTimer = null;
+  }
 });
 </script>

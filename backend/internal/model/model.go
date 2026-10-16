@@ -1,6 +1,7 @@
 package model
 
 import (
+	"strings"
 	"time"
 
 	"gorm.io/gorm"
@@ -20,24 +21,30 @@ const (
 	SourceImmich         = "immich"
 	SourceFractal        = "fractal"
 	SourceDLA            = "dla"
+	// Search-topic sources: each user topic becomes a synced album.
+	SourceUnsplash = "unsplash"
+	SourcePexels   = "pexels"
 )
 
 type Image struct {
-	ID              uint           `gorm:"primaryKey" json:"id"`
-	FilePath        string         `json:"file_path"`
-	Caption         string         `json:"caption"`
-	Width           int            `json:"width"`
-	Height          int            `json:"height"`
-	Orientation     string         `json:"orientation"` // "landscape", "portrait"
-	UserID          int64          `json:"user_id"`
-	Status          string         `json:"status"`                                                                                                                      // pending, shown
-	Source          string         `gorm:"index:idx_images_source;index:idx_images_source_synology,priority:1;index:idx_images_source_immich,priority:1" json:"source"` // "local", "google_photos", "synology_photos"
-	SynologyPhotoID int            `gorm:"index:idx_images_source_synology,priority:2" json:"synology_id"`
-	ThumbnailKey    string         `json:"thumbnail_key"`                                                    // Cache key for Synology
-	ImmichAssetID   string         `gorm:"index:idx_images_source_immich,priority:2" json:"immich_asset_id"` // UUID for Immich assets
-	PhotoTakenAt    *time.Time     `json:"photo_taken_at"`                                                   // Original photo creation/taken date
-	CreatedAt       time.Time      `json:"created_at"`
-	DeletedAt       gorm.DeletedAt `gorm:"index" json:"-"`
+	ID          uint   `gorm:"primaryKey" json:"id"`
+	FilePath    string `json:"file_path"`
+	Caption     string `json:"caption"`
+	Width       int    `json:"width"`
+	Height      int    `json:"height"`
+	Orientation string `json:"orientation"` // "landscape", "portrait"
+	UserID      int64  `json:"user_id"`
+	Status      string `json:"status"`                                                                            // pending, shown
+	Source      string `gorm:"index:idx_images_source;index:idx_images_source_external,priority:1" json:"source"` // "local", "google_photos", "synology_photos"
+	// ExternalID is the source's stable id for this asset (immich UUID, synology
+	// photo id as text, unsplash/pexels id). Indexed with Source for dedup; the
+	// generic replacement for the old per-source id columns (immich_asset_id,
+	// synology_photo_id).
+	ExternalID   string         `gorm:"index:idx_images_source_external,priority:2" json:"external_id"`
+	ThumbnailKey string         `json:"thumbnail_key"`  // Cache key for Synology
+	PhotoTakenAt *time.Time     `json:"photo_taken_at"` // Original photo creation/taken date
+	CreatedAt    time.Time      `json:"created_at"`
+	DeletedAt    gorm.DeletedAt `gorm:"index" json:"-"`
 }
 
 type GoogleAuth struct {
@@ -55,33 +62,78 @@ type GoogleCalendarAuth struct {
 }
 
 type Device struct {
-	ID             uint    `gorm:"primaryKey" json:"id"`
-	Name           string  `json:"name"`
-	Host           string  `gorm:"index" json:"host"` // IP or Hostname
-	Width          int     `json:"width"`
-	Height         int     `json:"height"`
-	Orientation    string  `json:"orientation"`
-	BoardName      string  `json:"board_name"`
-	EnableCollage  bool    `json:"enable_collage"` // Per-device collage setting
-	ShowDate       bool    `json:"show_date"`
-	ShowPhotoDate  bool    `json:"show_photo_date"`
-	ShowWeather    bool    `json:"show_weather"`
-	WeatherLat     float64 `json:"weather_lat"`
-	WeatherLon     float64 `json:"weather_lon"`
+	ID          uint   `gorm:"primaryKey" json:"id"`
+	Name        string `json:"name"`
+	Host        string `gorm:"index" json:"host"` // IP or Hostname
+	Width       int    `json:"width"`
+	Height      int    `json:"height"`
+	Orientation string `json:"orientation"`
+	BoardName   string `json:"board_name"`
+	// Display color model reported by the device: "spectra6" (6-color ACeP),
+	// "gc16" (16-level grayscale / IT8951), or "" (legacy, treated as spectra6).
+	DisplayType   string  `json:"display_type" gorm:"default:''"`
+	EnableCollage bool    `json:"enable_collage"` // Per-device collage setting
+	ShowDate      bool    `json:"show_date"`
+	ShowPhotoDate bool    `json:"show_photo_date"`
+	ShowWeather   bool    `json:"show_weather"`
+	WeatherLat    float64 `json:"weather_lat"`
+	WeatherLon    float64 `json:"weather_lon"`
 	AIProvider    string  `gorm:"column:ai_provider" json:"ai_provider"`
 	AIModel       string  `gorm:"column:ai_model" json:"ai_model"`
 	AIPrompt      string  `gorm:"column:ai_prompt" json:"ai_prompt"`
 	Layout        string  `json:"layout"`       // "photo_info", "photo_overlay", "side_panel"
 	DisplayMode   string  `json:"display_mode"` // "cover" or "fit"
-	ShowCalendar  bool    `json:"show_calendar"`
-	CalendarID    string  `json:"calendar_id"` // Google Calendar ID (per-device)
-	DateFormat    string  `json:"date_format"` // Go time format string, empty = default "Mon, Jan 02"
+	// Palette color name used to letterbox photos in fit mode (passed to
+	// epaper-image-convert --background-color). Empty = CLI default (white).
+	BackgroundColor string `json:"background_color" gorm:"default:''"`
+	// Last battery level the frame reported (X-Battery-Percentage header on
+	// image fetches); -1 = never reported
+	BatteryLevel      int        `json:"battery_level" gorm:"default:-1"`
+	BatteryReportedAt *time.Time `json:"battery_reported_at"`
+	// Last firmware version the frame reported (X-Firmware-Version header
+	// on image fetches); empty = never reported
+	FirmwareVersion string `json:"firmware_version" gorm:"default:''"`
+	// Per-device image source (e.g. "immich"), resolved by the unified /image
+	// endpoint. Empty means the device hasn't picked a server-side source.
+	Source       string `json:"source"`
+	ShowCalendar bool   `json:"show_calendar"`
+	CalendarID   string `json:"calendar_id"` // Google Calendar ID (per-device)
+	DateFormat   string `json:"date_format"` // Go time format string, empty = default "Mon, Jan 02"
+	// Password for the frame's own HTTP API when its owner enabled the
+	// optional authentication. Empty = open, the firmware default. Never
+	// serialized outward -- the UI posts it and only learns whether one is
+	// set (see HTTPPasswordSet on the API response).
+	HTTPPassword string `json:"-" gorm:"column:http_password;default:''"`
+	// Reported instead of the password itself, so the UI can show whether one
+	// is configured without the value ever leaving the server.
+	HTTPPasswordSet bool `json:"http_password_set" gorm:"-"`
+	// AuthRequired: the frame refused this server's last request for want of
+	// the right password (401), so nothing the server does with the frame
+	// works until the user enters the frame's password. Cleared by the next
+	// request the frame answers, and when a new password is stored.
+	// AuthFailedAt is when the refusals started; it stays put while they
+	// last, so the webapp can tell a new refusal from the one it already
+	// asked about.
+	AuthRequired bool       `json:"auth_required" gorm:"default:false"`
+	AuthFailedAt *time.Time `json:"auth_failed_at"`
 	// Remote config sync fields (JSON blobs synced from/to device)
 	DeviceConfig             string    `json:"device_config" gorm:"default:'{}'"`
 	DeviceProcessingSettings string    `json:"device_processing_settings" gorm:"default:'{}'"`
 	DeviceColorPalette       string    `json:"device_color_palette" gorm:"default:'{}'"`
 	ConfigLastUpdated        int64     `json:"config_last_updated" gorm:"default:0"`
 	CreatedAt                time.Time `json:"created_at"`
+}
+
+// AfterFind reports whether a device HTTP password is stored without ever
+// serializing the value. Done as a hook so every load path gets it right.
+func (d *Device) AfterFind(tx *gorm.DB) error {
+	d.HTTPPasswordSet = d.HTTPPassword != ""
+	return nil
+}
+
+// IsGrayscale reports whether this device drives a grayscale (GC16) panel.
+func (d *Device) IsGrayscale() bool {
+	return strings.HasPrefix(d.DisplayType, "gc") || d.BoardName == "seeedstudio_reterminal_e1003"
 }
 
 const (
@@ -107,11 +159,6 @@ type UserSession struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
-type DeviceImageMapping struct {
-	DeviceID uint `gorm:"primaryKey" json:"device_id"`
-	ImageID  uint `gorm:"primaryKey" json:"image_id"`
-}
-
 type URLSource struct {
 	ID        uint      `gorm:"primaryKey" json:"id"`
 	URL       string    `json:"url"`
@@ -121,6 +168,49 @@ type URLSource struct {
 type DeviceURLMapping struct {
 	DeviceID    uint `gorm:"primaryKey" json:"device_id"`
 	URLSourceID uint `gorm:"primaryKey" json:"url_source_id"`
+}
+
+const (
+	AlbumKindReal    = "album"   // a real album from the source
+	AlbumKindVirtual = "virtual" // an Immich mode expressed as an album
+
+	// Virtual album external IDs (Immich source modes as albums).
+	ImmichVirtualAll       = "__all__"
+	ImmichVirtualFavorites = "__favorites__"
+	ImmichVirtualMemories  = "__memories__"
+)
+
+// Album is a persisted photo-source album (Immich/Synology). Real albums map
+// to a source album by ExternalID; virtual albums (Immich all/favorites/
+// memories) use the ImmichVirtual* sentinels. SyncEnabled marks albums the
+// server pulls assets for.
+type Album struct {
+	ID          uint   `gorm:"primaryKey" json:"id"`
+	Source      string `gorm:"uniqueIndex:idx_albums_source_external,priority:1" json:"source"`
+	ExternalID  string `gorm:"uniqueIndex:idx_albums_source_external,priority:2" json:"external_id"`
+	Name        string `json:"name"`
+	Kind        string `json:"kind"` // "album" | "virtual"
+	SyncEnabled bool   `json:"sync_enabled"`
+	// SharePassphrase grants access to a Synology album shared with (not owned
+	// by) the logged-in account. Empty for owned albums and other sources.
+	SharePassphrase string    `json:"-"`
+	AssetCount      int       `gorm:"-" json:"asset_count"` // computed live in ListAlbums; not stored
+	CoverKey        string    `json:"cover_key"`
+	UpdatedAt       time.Time `json:"updated_at"`
+}
+
+// ImageAlbumMembership is the many-to-many link between an image (asset) and
+// the albums it belongs to. One images row per asset; membership scopes it.
+type ImageAlbumMembership struct {
+	ImageID uint `gorm:"primaryKey" json:"image_id"`
+	AlbumID uint `gorm:"primaryKey" json:"album_id"`
+}
+
+// DeviceAlbumMapping binds a device to the albums it draws photos from
+// (multiple albums per device, one source per device by convention).
+type DeviceAlbumMapping struct {
+	DeviceID uint `gorm:"primaryKey" json:"device_id"`
+	AlbumID  uint `gorm:"primaryKey" json:"album_id"`
 }
 
 // GenerativeState persists the rolling state for a procedural image source

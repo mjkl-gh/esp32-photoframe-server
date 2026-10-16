@@ -17,7 +17,7 @@ func NewImmichHandler(s *service.ImmichService) *ImmichHandler {
 
 func (h *ImmichHandler) TestConnection(c echo.Context) error {
 	if err := h.immich.TestConnection(); err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return respondError(c, http.StatusBadRequest, err.Error())
 	}
 	return c.JSON(http.StatusOK, map[string]string{"status": "ok"})
 }
@@ -25,29 +25,28 @@ func (h *ImmichHandler) TestConnection(c echo.Context) error {
 func (h *ImmichHandler) ListAlbums(c echo.Context) error {
 	albums, err := h.immich.ListAlbums()
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return respondError(c, http.StatusInternalServerError, err.Error())
 	}
 	return c.JSON(http.StatusOK, albums)
 }
 
-func (h *ImmichHandler) Sync(c echo.Context) error {
-	if err := h.immich.ClearAndResync(); err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+// SetSyncAlbums defines which Immich albums (real + virtual modes) to sync.
+// POST /api/immich/sync-albums
+func (h *ImmichHandler) SetSyncAlbums(c echo.Context) error {
+	var req struct {
+		AlbumIDs  []string `json:"album_ids"`
+		Favorites bool     `json:"favorites"`
+		All       bool     `json:"all"`
+		Memories  bool     `json:"memories"`
 	}
-	return c.JSON(http.StatusOK, map[string]string{"status": "synced"})
+	if err := c.Bind(&req); err != nil {
+		return respondError(c, http.StatusBadRequest, "invalid request")
+	}
+	if err := h.immich.SetSyncAlbums(req.AlbumIDs, req.Favorites, req.All, req.Memories); err != nil {
+		return respondError(c, http.StatusInternalServerError, err.Error())
+	}
+	return c.JSON(http.StatusOK, map[string]string{"status": "ok"})
 }
 
-func (h *ImmichHandler) Clear(c echo.Context) error {
-	if err := h.immich.ClearPhotos(); err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
-	}
-	return c.JSON(http.StatusOK, map[string]string{"status": "cleared"})
-}
-
-func (h *ImmichHandler) GetPhotoCount(c echo.Context) error {
-	count, err := h.immich.GetPhotoCount()
-	if err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
-	}
-	return c.JSON(http.StatusOK, map[string]interface{}{"count": count})
-}
+// Sync / SyncStatus / Clear / Count are served by the generic PhotoSyncHandler
+// (see photosync_handler.go) — identical across photo sources.

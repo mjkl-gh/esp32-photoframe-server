@@ -180,7 +180,51 @@ func (c *Client) ListAlbums(offset, limit int) ([]Album, error) {
 	return result.Data.List, nil
 }
 
-func (c *Client) ListPhotos(offset, limit int, albumID int) ([]Item, error) {
+// ListSharedWithMeAlbums returns the albums other DSM users have shared with
+// the logged-in account. SYNO.Foto.Browse.Album lists only albums the account
+// owns, which left shared albums invisible to the album picker — issue #52.
+func (c *Client) ListSharedWithMeAlbums(offset, limit int) ([]Album, error) {
+	endpoint := fmt.Sprintf("%s/webapi/entry.cgi", c.BaseURL)
+	params := url.Values{}
+	params.Set("api", "SYNO.Foto.Sharing.Misc")
+	params.Set("version", "1")
+	// DSM 7.4 names the album listing list_shared_with_me_album;
+	// list_shared_with_me does not exist and returns error 103.
+	params.Set("method", "list_shared_with_me_album")
+	params.Set("offset", fmt.Sprintf("%d", offset))
+	params.Set("limit", fmt.Sprintf("%d", limit))
+	if c.SynoToken != "" {
+		params.Set("SynoToken", c.SynoToken)
+	}
+
+	req, err := http.NewRequest("GET", endpoint+"?"+params.Encode(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("api returned status: %d", resp.StatusCode)
+	}
+
+	var result BrowseAlbumResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, err
+	}
+
+	if !result.Success {
+		return nil, fmt.Errorf("api call failed with code: %d", result.Error.Code)
+	}
+
+	return result.Data.List, nil
+}
+
+func (c *Client) ListPhotos(offset, limit int, album AlbumRef) ([]Item, error) {
 	endpoint := fmt.Sprintf("%s/webapi/entry.cgi", c.BaseURL)
 	params := url.Values{}
 	params.Set("api", "SYNO.Foto.Browse.Item")
@@ -190,8 +234,13 @@ func (c *Client) ListPhotos(offset, limit int, albumID int) ([]Item, error) {
 	params.Set("offset", fmt.Sprintf("%d", offset))
 	params.Set("limit", fmt.Sprintf("%d", limit))
 	params.Set("additional", `["thumbnail","resolution"]`)
-	if albumID != 0 {
-		params.Set("album_id", fmt.Sprintf("%d", albumID))
+	// Shared albums are browsed through the passphrase DSM issued for them.
+	// DSM rejects album_id and passphrase together (error 120), so the
+	// passphrase replaces the album id rather than accompanying it.
+	if album.Passphrase != "" {
+		params.Set("passphrase", album.Passphrase)
+	} else if album.ID != 0 {
+		params.Set("album_id", fmt.Sprintf("%d", album.ID))
 	}
 	if c.SynoToken != "" {
 		params.Set("SynoToken", c.SynoToken)
@@ -226,7 +275,7 @@ func (c *Client) ListPhotos(offset, limit int, albumID int) ([]Item, error) {
 
 // GetPhoto fetches a thumbnail
 // size: "small", "medium", "large"
-func (c *Client) GetPhoto(id int, cacheKey string, size string, albumID int, synoToken string) ([]byte, error) {
+func (c *Client) GetPhoto(id int, cacheKey string, size string, album AlbumRef, synoToken string) ([]byte, error) {
 	path := "/webapi/entry.cgi"
 	fullURL, _ := url.JoinPath(c.BaseURL, path)
 
@@ -244,15 +293,24 @@ func (c *Client) GetPhoto(id int, cacheKey string, size string, albumID int, syn
 	}
 
 	// Strictly match parameter order from curl:
-	// id=3253&cache_key=%22...%22&type=%22unit%22&size=%22xl%22&album_id=21&api=%22...%22&method=%22get%22&version=2&SynoToken=...
+	// id=3253&cache_key=%22...%22&type=%22item%22&size=%22xl%22&album_id=21&api=%22...%22&method=%22get%22&version=2&SynoToken=...
+	//
+	// id is the item ID, so type must be "item". type "unit" expects the
+	// thumbnail's unit_id, which only happens to equal the item ID for older
+	// items; for the rest DSM answers 404.
 	parts := []string{
 		fmt.Sprintf("id=%d", id),
 		fmt.Sprintf("cache_key=%s", url.QueryEscape(fmt.Sprintf("\"%s\"", cacheKey))),
-		"type=%22unit%22",
+		"type=%22item%22",
 		fmt.Sprintf("size=%s", url.QueryEscape(fmt.Sprintf("\"%s\"", sz))),
 	}
-	if albumID != 0 {
-		parts = append(parts, fmt.Sprintf("album_id=%d", albumID))
+	// As in ListPhotos: the passphrase replaces album_id; with both set DSM
+	// answers 404.
+	if album.Passphrase != "" {
+		parts = append(parts, fmt.Sprintf("passphrase=%s",
+			url.QueryEscape(fmt.Sprintf("\"%s\"", album.Passphrase))))
+	} else if album.ID != 0 {
+		parts = append(parts, fmt.Sprintf("album_id=%d", album.ID))
 	}
 	parts = append(parts,
 		fmt.Sprintf("api=%s", url.QueryEscape(fmt.Sprintf("\"%s\"", api))),

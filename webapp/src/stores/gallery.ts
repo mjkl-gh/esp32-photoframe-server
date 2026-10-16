@@ -15,8 +15,14 @@ export const useGalleryStore = defineStore('gallery', {
       | 'google_photos'
       | 'synology_photos'
       | 'immich'
+      | 'unsplash'
+      | 'pexels'
       | 'gallery'
       | 'url_proxy',
+    album: null as number | null,
+    // Bumped to ask the Gallery view to refetch photos + album chips
+    // (e.g. after a Delete All from the source config tab).
+    refreshSignal: 0,
   }),
   getters: {
     totalPages: (state) => Math.ceil(state.totalPhotos / state.limit),
@@ -27,29 +33,57 @@ export const useGalleryStore = defineStore('gallery', {
         | 'google_photos'
         | 'synology_photos'
         | 'immich'
+        | 'unsplash'
+        | 'pexels'
         | 'gallery'
         | 'url_proxy'
     ) {
       this.source = source;
+      this.page = 1;
+      this.album = null;
+      this.photos = [];
+      this.totalPhotos = 0;
+      this.fetchPhotos();
+    },
+
+    setAlbum(album: number | null) {
+      this.album = album;
       this.page = 1;
       this.photos = [];
       this.totalPhotos = 0;
       this.fetchPhotos();
     },
 
+    triggerRefresh() {
+      this.refreshSignal++;
+    },
+
     async fetchPhotos() {
       this.loading = true;
+      // Capture the request context so a slow response from a previous
+      // source/album/page doesn't clobber a newer one (e.g. on load, the
+      // default 'gallery' fetch racing the hash-restored source).
+      const reqSource = this.source;
+      const reqAlbum = this.album;
+      const reqPage = this.page;
+      const isCurrent = () =>
+        this.source === reqSource &&
+        this.album === reqAlbum &&
+        this.page === reqPage;
       try {
-        const offset = (this.page - 1) * this.limit;
-        const res = await api.get(
-          `/gallery/photos?source=${this.source}&limit=${this.limit}&offset=${offset}`
-        );
+        const offset = (reqPage - 1) * this.limit;
+        let url = `/gallery/photos?source=${reqSource}&limit=${this.limit}&offset=${offset}`;
+        if (reqAlbum != null) {
+          url += `&album=${reqAlbum}`;
+        }
+        const res = await api.get(url);
+        if (!isCurrent()) return; // discard stale response
         this.photos = res.data.photos || [];
         this.totalPhotos = res.data.total || 0;
       } catch (e) {
         console.error('Failed to fetch photos', e);
       } finally {
-        this.loading = false;
+        if (isCurrent()) this.loading = false;
       }
     },
 

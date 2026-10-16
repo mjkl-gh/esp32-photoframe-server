@@ -1,5 +1,339 @@
 # Changelog
 
+## v1.17.2
+
+### Fixed
+
+- **Frames on the Dynamic or Vivid preset were still rendered with dynamic
+  range compression.** The server passed `--compress-dynamic-range` to
+  `epaper-image-convert` only when the setting was on and nothing otherwise,
+  so the CLI's default preset (balanced, compression on) applied to the frame
+  while the dashboard preview honoured the setting. Off now passes
+  `--no-compress-dynamic-range`. (#64 by @manuel-schmied)
+
+## v1.17.1
+
+### Fixed
+
+- **Syncing a frame stored by its `.local` name failed with `lookup fdb6:…: no
+  such host`.** Inside Home Assistant the Supervisor's mDNS resolver now and
+  then answers a `.local` name with only the frame's IPv6 addresses; the
+  server took the first one and built a URL without brackets. The lookup is
+  retried for an IPv4 address, a routable IPv6 answer is used bracketed, and a
+  link-local-only answer is refused with a message that says to use the
+  frame's IPv4 address.
+
+## v1.17.0
+
+### Added
+
+- **Frames protected by a password.** The firmware can require a password
+  on the frame's own HTTP API (esp32-photoframe #130). Enter it when
+  adding the frame ("This frame requires a password") or later under Edit
+  Device → Advanced network settings → Frame password; the server checks
+  it against the frame before storing it and uses it for config sync,
+  image pushes and Sync from Device. Write-only: the API only ever
+  reports `http_password_set`. Requires the firmware release after
+  v2.18.0; older firmware is detected and refused with a clear message.
+- **Change or remove the frame's password from the dashboard.** "Password
+  on the frame" sets a new password on the frame itself, signed in with
+  the stored one, so the server keeps working after the change; "Turn off
+  password on the frame" removes it. Update the Home Assistant
+  integration and the mobile app afterwards.
+- **"Password required" prompt.** When a frame starts refusing the
+  server's password, its row gets a warning chip and the dashboard asks
+  for the password — on load, from the chip, from the device dialog, and
+  after a push, sync or config save the frame refused — then retries the
+  action. "Not now" is remembered per device until the frame refuses
+  again. The frame's 401 is reported as a 409 with code
+  `frame_auth_required` (`push_result: "auth_required"` on a config
+  save), never as a 401, which the dashboard treats as its own session
+  expiring.
+- **Time zone picker.** Edit Device → General offers a searchable list of
+  464 IANA zones mapped to the POSIX TZ rule the frame's tzset() takes,
+  "Use this browser's time zone", and an advanced field for a custom
+  rule. The rule is loaded and saved verbatim: a DST rule set on the
+  frame used to load as 0 and be written back as "UTC0" on the next Save,
+  putting a rotation schedule hours off. (esp32-photoframe #128)
+- **Synology albums shared with the account.** The album picker lists
+  albums other DSM users shared with the login (badged "Shared"), browsed
+  through the passphrase DSM issues for them. (#52; #63 by
+  @aashishvanand)
+
+### Changed
+
+- **Synology listings are paged.** Album lists were capped at 100 and
+  each album at 5,000 photos; both now page until DSM runs out (bounded
+  at 10,000 albums and 100,000 photos per album, with a log line when a
+  bound is hit). (#56, reported by @aashishvanand)
+- **Another photo is tried when the picked one fails to load.** A photo
+  deleted upstream, a NAS 404 or a corrupt file no longer fails the
+  frame's image fetch with a 500: the failure is logged with the photo's
+  id and up to three photos are tried per request, in collage mode too.
+  (#61, reported by @aashishvanand)
+- **Auto-sync follows the album picker.** Immich and Synology auto-sync
+  gated on the legacy single-album settings and silently never ran for
+  setups configured through the multi-album picker. Album rows now gate
+  it, a picker change re-arms the scheduler, and an enabled-but-
+  unconfigured source logs one warning instead of nothing. (#54)
+- **Weather uses the location's time zone.** Open-Meteo is asked for
+  `timezone=auto`, so the overlay's date and calendar day follow the
+  device's latitude/longitude instead of rendering in UTC (the default
+  "GMT" answer silently satisfied `time.LoadLocation`). Thanks @andysiu.
+- **Docker images build on native runners** and pin the converter to the
+  current npm release, so a new epaper-image-convert is picked up instead
+  of a cached layer silently keeping the old one. The converter is now
+  0.1.21, whose `--device-config` reads a frame's exported config.
+
+### Fixed
+
+- **Synology thumbnails 404 (endless spinner) on newer DSM items.**
+  Thumbnails were requested with the item id but `type=unit`; DSM 7.4.1
+  gives newer items a different unit id, so whole albums failed to show
+  or push. Requested by item now; existing rows need no resync. (#59;
+  #60 by @aashishvanand)
+- **Shared Synology albums failed with DSM error 120 / 404.** The
+  passphrase is sent instead of `album_id` (DSM rejects the pair), the
+  listing uses `list_shared_with_me_album`, and owned albums shared out
+  by link no longer carry their link passphrase into syncs — a stale one
+  stored by an earlier build is cleared on the next sync. (#63 by
+  @aashishvanand)
+- **Immich "latest" memory year with only videos synced nothing.** The
+  newest "on this day" lane that still has a servable image is used, so
+  a video-only year falls back to an older one. (#48)
+- **Weather humidity/icon fell back to midnight in half-hour zones.**
+  With `timezone=auto` the current time lands on :30 in Asia/Kolkata and
+  :45 in Pacific/Chatham; the hourly match now compares on the hour.
+- A frame that accepts a connection but never answers could hold a
+  device's lock for minutes during a password change; every request the
+  change makes is now bounded to 10 s.
+
+## v1.16.0
+
+### Added
+
+- **Battery column in the device list.** Frames report their charge with
+  every image fetch (X-Battery-Percentage); Settings → Devices now shows
+  the last reported level with a battery icon (red at 20% and below) and
+  the report time on hover, in both the desktop table and the phone
+  list. Frames that never fetch show a dash.
+- **Firmware version column.** The Host column (already available via the
+  Open Device button and the edit dialog) is replaced by the frame's last
+  reported firmware version, so outdated frames stand out at a glance.
+
+### Changed
+
+- **epaper-image-convert 0.1.20.** Reverts 0.1.19's per-channel
+  dynamic-range compression, which washed out midtone chroma by roughly
+  7% and skewed hues toward cyan. Server-rendered photos are back to the
+  vibrant CIELAB lightness-only compression.
+
+
+## v1.15.0
+
+### Added
+
+- **Photo scale mode synced from the frame.** The fit/cover layout and the
+  letterbox background color (white or black) are now device-owned
+  processing settings, synced through the same channel as dithering and
+  tone settings. The controls moved to Edit Device → Processing (first
+  row, matching the device web app); saving pushes them to a reachable
+  frame immediately and defers to the next fetch otherwise. Frames on
+  older firmware keep working through the legacy per-device fields.
+  Requires firmware v2.16.0 for device-side sync.
+
+### Changed
+
+- **epaper-image-convert 0.1.19.** Dynamic-range compression now remaps
+  each channel in linear light onto the panel's measured range, so pure
+  white and black letterboxes and backgrounds render clean — the ~1%
+  red/yellow speckle CDR-enabled presets produced on white areas is gone.
+  Server-side rendering now matches on-device processing exactly.
+- **Overlay pushes honor the synced layout.** Gallery/Telegram pushes with
+  an overlay render with the frame's synced scale mode instead of the
+  legacy column, and dashboard edits can no longer be silently shadowed
+  by a stale value from the frame during a pending sync.
+
+### Fixed
+
+- **Dashboard no longer serves a stale UI after updates.** index.html is
+  served with no-cache (hashed assets stay immutable), so the browser
+  picks up a new release without a hard refresh — previously the old
+  bundle could survive for hours behind HA ingress.
+- **Add-on image builds work again.** The Material Symbols font is fetched
+  from the Google Fonts API instead of GitHub raw downloads, which had
+  started rejecting anonymous requests.
+
+
+## v1.14.0
+
+### Added
+
+- **Advanced network settings in the device config.** Edit Device → General
+  now groups the NTP server into a collapsed "Advanced network settings"
+  panel and adds static IP (mode/address/netmask/gateway) and DNS override
+  fields, matching firmware v2.15.0's static IP support. The new fields
+  render — and are sent to the device — only when the device's firmware
+  reports the capability, so devices on older firmware look and behave
+  exactly as before.
+- **Randomized topic sync for Unsplash and Pexels.** Topic syncs always
+  fetched the same top-100 search results, so a topic album never changed
+  after the first sync. A new per-source "Randomize results" option (off by
+  default) samples random pages from the first 1000 results — page 1 is
+  always included to anchor the most relevant photos — so each sync rotates
+  a different set into the album.
+- **Server version in the webapp footer.** The running version (from the
+  release tag; "dev" for local builds) is shown in a footer and exposed on
+  the public `/api/status` health endpoint, so users on the `latest` image
+  tag can see which version they're running. (#6)
+
+## v1.12.0
+
+### Added
+
+- **Open-device button in the device list.** Each device row in Settings → Devices now has an open-in-new-tab button that opens the photoframe's own web UI.
+- **Fit-mode background color.** New per-device "Fit Background Color" setting (Edit Device → General → Display Settings, shown when the display mode is Fit). Letterboxed photos fill the panel margins with the chosen palette color (white, black, red, green, blue, or yellow) instead of always white.
+
+### Fixed
+
+- **The fit/cover display mode was ignored unless an overlay was enabled.** With overlays and collage off, photos went to `epaper-image-convert` without `--scale-mode`, so a frame set to Fit was still cropped as Cover. The device's mode is now always passed to the CLI.
+- **Unchecking a synced album (Immich/Synology) now actually removes its photos.** Previously the album's images stayed in the gallery and kept rotating onto devices until a manual Clear. Deselecting an album — or resyncing after one was disabled through any path — now removes its photos, unless they also belong to a still-enabled album; re-checking the album re-imports them on the next sync. Cached thumbnails of deleted photos are also garbage-collected from disk, including files leaked by earlier versions.
+- **An expired Synology session no longer wedges the Connect flow.** When the NAS session expired (e.g. after a reboot), every gallery thumbnail request retried a full login serially under a lock, so pressing Connect appeared stuck for minutes. Auth-expired requests now share a single re-login, failed logins back off for 30 seconds (background requests fail fast instead of retrying), and the explicit Connect button always goes straight through.
+- **HTTP 500s now include their error message in the server access log.** Error responses were logged with an empty `"error":""` field, hiding the cause of failures like the above.
+
+## v1.11.4
+
+### Fixed
+
+- **Current Image thumbnail broke behind an https reverse proxy.** The `X-Thumbnail-URL` header hardcoded `http://`, so devices behind a TLS-terminating proxy (e.g. Caddy) got a URL they couldn't download, leaving a broken Current Image in Home Assistant. The URL now uses the "Server URL for devices" setting when configured, otherwise derives the scheme from the request (honoring `X-Forwarded-Proto`). (#41)
+
+## v1.11.3
+
+### Fixed
+
+- **Random photo selection now respects the device orientation** for DB-backed sources (Immich, Synology, gallery, Google Photos). Previously the normal (non-collage) flow ignored orientation, so a portrait frame could be served landscape photos even when portrait ones were available. It now prefers matching-orientation photos, falling back to any orientation only when none match (`auto`/no-EXIF photos still match either). (#40)
+
+## v1.11.2
+
+### Fixed
+
+- **Photo overlays (date / weather / calendar) failed to render**, returning a 500 with `libLLVM.so.19.1` errors from headless Chrome. An earlier image-size cleanup deleted `libLLVM`, which Alpine 3.21's updated `mesa-gallium` (24.2.8) now hard-requires via `libgallium` — so freshly built images broke Chromium on both amd64 and arm64. Restored the removed libraries. (#39)
+
+## v1.11.1
+
+### Fixed
+
+- **Synology:** manually pushing a selected photo failed with a 404 on libraries synced after the `external_id` migration — the push still used the legacy per-source id (0 for new rows). It now resolves the photo the same way the slideshow does. (#37)
+- **Topic sources (Unsplash, Pexels):** manually pushing a selected photo failed with "image file not found on server" — those photos are remote URLs rather than local files, and are now downloaded before pushing.
+
+## v1.11.0
+
+### Added
+
+- **Two-way config sync.** Settings changed on the device itself now propagate back to the server. The device advertises a config timestamp on each image fetch; when it's newer than the server's copy, the server asks the device to stay awake briefly (`X-Post-Rotate-Wait-Sec`) and pulls the updated config. Previously the sync was push-only (server → device), so on-device edits were silently ignored. Requires firmware v2.11.0+.
+
+## v1.10.0
+
+### Added
+
+- **Cron-based rotation schedule builder.** The device auto-rotate schedule is now edited as repeating intervals, specific times, and day-of-week selection, compiled to simplified 3-field cron rules (`minute hour day-of-week`) — replacing the single rotation interval. A unit-test suite covers the cron parser, next-run preview, and rule compilation.
+
+### Changed
+
+- Pre-cron firmware is detected automatically and gets a simplified interval-only editor over the legacy API, so schedule edits can't be silently lost or leave the server showing a schedule the device isn't running.
+- The Sleep schedule (quiet hours) is shown only for pre-cron firmware; cron firmware bounds its active hours in the rules instead (e.g. `0 7-23/2 *`, or two rules for overnight coverage).
+
+### Fixed
+
+- Immich: support the v3 album API that drops inline assets.
+
+## v1.9.2
+
+### Fixed
+- **Referential integrity is now enforced by the database.** The junction/child tables (album memberships, device↔album/URL mappings, generative state, device history) had no foreign keys, so deleting a photo, album, device, or URL source relied on hand-written cleanup in every code path — and a missed path left orphaned rows behind (a real one was found in production). These now carry `ON DELETE CASCADE` (and `SET NULL` for device-history image references, so the served-history log survives a photo deletion), and the migration purges any pre-existing orphans.
+- Startup now runs `VACUUM` once after a migration that rebuilds tables, reclaiming freed space.
+
+## v1.9.1
+
+### Fixed
+- **Synced photos no longer vanish after a server restart.** On startup every source auto-synced at once, and their concurrent SQLite writes collided on the single-writer lock (`database is locked`). A source whose import lost that race imported nothing — and because sync cleared the gallery *before* re-importing, it was left empty. Most visible on Unsplash, whose single topic album meant one lost race wiped everything. Two fixes: database access is now serialized so the lock contention can't happen, and sync is non-destructive so a failed import can never wipe existing photos.
+- Image dedup for Immich/Synology/Unsplash/Pexels is now enforced by a unique `(source, external_id)` constraint, not just application logic.
+
+## v1.9.0
+
+### Added
+- **GC16 grayscale panel support.** Full processing + Floyd-Steinberg dithering pipeline for 16-level grayscale e-paper (IT8951 / reTerminal E1003), with per-device black/white-luminance and gamma calibration.
+- **Unsplash & Pexels sources.** Turn any topic (e.g. `black and white`, `landscape`) into a synced album of free stock photography — ideal for a themed or grayscale art frame. Add your free API key, add topics, and each topic becomes an album you can assign to a frame.
+
+### Changed
+- **Devices only ever serve their assigned source.** A device is served solely the source configured for it on the server; the `/image/<source>` path can no longer point a device at a source it isn't assigned to (a device with no source set returns an error until it's configured under Settings → Devices).
+
+### Fixed
+- **Synology orientation.** Photos Synology returns without dimensions are no longer mislabeled as landscape — the server decodes a thumbnail to recover the true orientation, so portrait photos stop landing in landscape collage slots.
+- Gallery thumbnails for Immich/Synology and the new URL-based sources.
+
+## v1.8.2
+
+### Changed
+- **Unified Sources view.** The per-source settings are merged into the gallery: one tab per source (Gallery, Immich, Synology, Google, URL Proxy, AI Generation), each showing its gallery on top and that source's settings directly below. The separate "Data Sources" tab is gone; Devices + System remain as their own tabs.
+- **Less clicking to set up a source.** Connecting Immich/Synology now auto-loads the album list (no separate "Refresh albums" step), and the gallery refreshes immediately after you clear photos.
+- **Consistent connection controls.** Telegram and Synology now show a **Disconnect** button once configured (matching Immich/Google), and the gallery's Telegram/push-to-device settings save automatically (no "Update Settings" button).
+- **Tab/label tidy-up.** "Google Photos" → "Google", Synology now sits before Google, the redundant "N photos synced" lines and the gallery info banner were removed, and the album-list border now matches the search field.
+
+### Fixed
+- Login form exposes proper `name`/`id`/autocomplete attributes so password managers (e.g. 1Password) reliably detect it. Note: iOS Safari still restricts autofill to HTTPS origins, so use an HTTPS URL (Tailscale/Nabu Casa/reverse proxy) on mobile.
+
+## v1.8.1
+
+### Security
+- **JWT signing secret hardening.** The secret is now resolved as `JWT_SECRET` env var → a persisted `jwt_secret` setting → a freshly generated random secret (persisted), so a fresh install is secure with no configuration instead of falling back to a hard-coded default that made tokens forgeable. Existing installs migrate gracefully: device tokens issued under the old default keep working (frames stay online), but admin/session tokens do **not** validate under the legacy secret — a forged admin token can't be honored. Re-login once after upgrading.
+- **Manual secret rotation.** A new **Regenerate** button (Settings → System) fully rotates the signing secret for users who want it — this signs you out and invalidates every device token, so each frame needs a new token generated and applied.
+
+### Changed
+- Internal code-quality pass: re-enabled TypeScript type-checking (`vue-tsc`) and enforced it in the build/CI/Docker pipeline; extracted reusable `<AlbumPicker>`, `useSnackbar()`, `getApiError()`, and a `SecurityTab` component out of the large Settings view; unified all backend handler error responses behind one helper.
+- Added test coverage for the migration chain and the auth/token lifecycle (including the secret-rotation and legacy-fallback paths), and bumped CI actions to current versions.
+
+## v1.8.0
+
+### Added
+- **Multi-album sync** for Immich and Synology: pick several albums per source and assign different album sets per device. Albums are now first-class entities (real albums plus Immich `all`/`favorites`/`memories` virtual albums), the gallery is grouped by album, and each album shows a live photo count.
+- **Album picker UX**: type-to-filter search, alphabetical sorting, and checked albums grouped at the top for quick review/unchecking.
+- **Configurable device-facing server URL** in Settings, so frames fetch images from the correct host in Tailscale / reverse-proxy setups instead of an auto-detected hostname.
+- **Background sync with live feedback**: a sync-status endpoint drives an in-progress indicator and auto-refreshes the gallery as photos import, and the gallery tab is restored after a page refresh (hash routing).
+- **Mobile-friendly Settings**: no more horizontal scrolling/accidental tab swipes on phones; the device dialog, device list, token list, and gallery header all adapt to small screens.
+
+### Changed
+- **Unified `/image` endpoint**: the photo source is resolved server-side from the requesting device (its token) instead of the URL path. The old `/image/:source` paths still work for back-compat, and per-source image URLs were removed from the UI.
+- **Album selection now persists immediately**; syncing is manual (a Sync button) or prompted when you leave the tab — no more accidental resyncs on every checkbox toggle.
+- Sync runs in the **background** (no more hung spinners), and "General" + "Security" were merged into a single **System** tab.
+- Google Photos "Clear All Photos" now matches the Immich/Synology layout.
+- **Smaller Docker image** (~1.83 GB → ~1.14 GB) by dropping the unused Mesa/LLVM GL stack and other runtime cruft.
+- Internal cleanups: shared source-parameterized sync helpers, a unified Immich/Synology sync handler, and live album counts via a single query.
+
+### Fixed
+- **Per-device source isolation**: a configured frame can no longer be served a different source/album via a URL-path override — it always gets the source it's configured for.
+- **Album import is now transactional and batched**, eliminating an N+1 per asset and preventing half-synced album state if an import fails midway.
+- Deleting a device no longer 500s (it referenced a table that never existed) and now cleans up the device's child rows in one transaction.
+- Album chips show live counts, emptied albums are hidden in the gallery, and a refresh no longer shows one tab's photos under another tab.
+- The device API token is auto-provisioned for the bare `/image` URL again.
+
+### Security
+- **Token-only device identification**: the spoofable `X-Hostname` and client-IP fallbacks were removed; a device is identified solely by its token.
+- Auth tokens are redacted from request logs, JWT validation is restricted to HS256, and the server warns when `JWT_SECRET` is unset.
+
+## v1.7.8
+
+### Added
+- Immich `memories` sync gained a **Memory Years** option (`immich_memory_mode`): `all` (default — shuffle across every "on this day" lane from all past years) or `latest` (only the most recent year's lane, for a focused "last year on this day" experience). The selector appears in Settings only when Sync Mode is `memories`. Refs #32
+
+### Changed
+- The gallery preview at the top of Settings now refreshes automatically after an Immich or Synology sync, so freshly synced photos appear without a manual page reload
+
+## v1.7.7
+
+### Fixed
+- Immich `memories` sync mode returned a random/unfiltered mix of photos instead of true "on this day" assets. `GetMemoryAssets()` called `/api/memories` with no query parameters, so Immich returned every persisted memory lane rather than the ones relevant to today. The request is now scoped with `for=<today, UTC>` and `type=on_this_day`. Closes #32
+
 ## v1.7.6
 
 ### Added

@@ -20,6 +20,63 @@ type AutoSyncScheduler struct {
 	stateMu       sync.Mutex
 	lastSuccessAt time.Time
 	retryAfter    time.Time
+	lastError     string
+	running       int
+	// warnedUnconfigured keeps the "enabled but not configured" warning to one
+	// line per episode instead of one per timer tick.
+	warnedUnconfigured bool
+}
+
+// warnUnconfigured logs that an enabled auto-sync has nothing it can sync,
+// once per episode — it re-arms via noteConfigured once the user fixes it.
+// Both places that skip a run call this, so the silent 24h fallback that hid
+// issue #54 for a release always leaves a trace in the log.
+func (s *AutoSyncScheduler) warnUnconfigured() {
+	s.stateMu.Lock()
+	already := s.warnedUnconfigured
+	s.warnedUnconfigured = true
+	s.stateMu.Unlock()
+	if !already {
+		log.Printf("%s auto-sync is enabled but not configured "+
+			"(no album selected?); skipping until that changes", s.name)
+	}
+}
+
+// noteConfigured re-arms the warning so a later misconfiguration is reported.
+func (s *AutoSyncScheduler) noteConfigured() {
+	s.stateMu.Lock()
+	s.warnedUnconfigured = false
+	s.stateMu.Unlock()
+}
+
+// LastError returns the failure message of the most recent completed sync run,
+// or "" if it succeeded (or none has run yet). Lets the sync-status endpoint
+// surface failures the dashboard would otherwise never see (issue #44).
+func (s *AutoSyncScheduler) LastError() string {
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
+	return s.lastError
+}
+
+// IsRunning reports whether any sync is currently in flight (queued or
+// executing). running is a counter so overlapping triggers each track their own
+// in-flight sync; the indicator only clears once every sync has finished.
+func (s *AutoSyncScheduler) IsRunning() bool {
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
+	return s.running > 0
+}
+
+func (s *AutoSyncScheduler) incRunning() {
+	s.stateMu.Lock()
+	s.running++
+	s.stateMu.Unlock()
+}
+
+func (s *AutoSyncScheduler) decRunning() {
+	s.stateMu.Lock()
+	s.running--
+	s.stateMu.Unlock()
 }
 
 func NewAutoSyncScheduler(opts AutoSyncSchedulerOptions) *AutoSyncScheduler {
@@ -68,12 +125,22 @@ func (s *AutoSyncScheduler) TriggerReset() {
 }
 
 func (s *AutoSyncScheduler) SyncNow() error {
+	s.incRunning()
+	defer s.decRunning()
+	return s.runSyncNow()
+}
+
+// runSyncNow performs a single sync run without touching the in-flight counter.
+// Callers are responsible for incrementing/decrementing running exactly once
+// around their logical sync so it isn't double-counted.
+func (s *AutoSyncScheduler) runSyncNow() error {
 	s.runMu.Lock()
 	defer s.runMu.Unlock()
 
 	if err := s.runSync(); err != nil {
 		s.stateMu.Lock()
 		s.retryAfter = time.Now().Add(s.retryInterval)
+		s.lastError = err.Error()
 		s.stateMu.Unlock()
 		return err
 	}
@@ -81,9 +148,28 @@ func (s *AutoSyncScheduler) SyncNow() error {
 	s.stateMu.Lock()
 	s.lastSuccessAt = time.Now()
 	s.retryAfter = time.Time{}
+	s.lastError = ""
 	s.stateMu.Unlock()
 	s.TriggerReset()
 	return nil
+}
+
+// SyncNowAsync runs a sync in the background and returns immediately. Runs are
+// serialized by SyncNow's mutex; errors are logged (callers that need to block
+// on the result should use SyncNow instead). Used by endpoints that shouldn't
+// hold the HTTP request open for a full clear+resync.
+func (s *AutoSyncScheduler) SyncNowAsync() {
+	// Mark running synchronously so the UI can observe an in-flight sync right
+	// away, even before the goroutine acquires the run lock and starts. The
+	// goroutine calls runSyncNow (which does not touch the counter) so this
+	// logical sync is counted exactly once.
+	s.incRunning()
+	go func() {
+		defer s.decRunning()
+		if err := s.runSyncNow(); err != nil {
+			log.Printf("[%s] async sync failed: %v", s.name, err)
+		}
+	}()
 }
 
 func (s *AutoSyncScheduler) loop() {
@@ -110,9 +196,14 @@ func (s *AutoSyncScheduler) loop() {
 
 func (s *AutoSyncScheduler) tryRunDue() {
 	enabled, _ := s.getConfig()
-	if !enabled || !s.isConfigured() {
+	if !enabled {
 		return
 	}
+	if !s.isConfigured() {
+		s.warnUnconfigured()
+		return
+	}
+	s.noteConfigured()
 
 	if err := s.SyncNow(); err != nil {
 		log.Printf("%s auto-sync failed: %v", s.name, err)
@@ -124,9 +215,17 @@ func (s *AutoSyncScheduler) tryRunDue() {
 
 func (s *AutoSyncScheduler) nextDelay() time.Duration {
 	enabled, interval := s.getConfig()
-	if !enabled || !s.isConfigured() {
+	if !enabled {
 		return 24 * time.Hour
 	}
+	if !s.isConfigured() {
+		// Reached at startup and on every reset, so this is where a
+		// misconfigured source actually gets reported; tryRunDue would only
+		// notice once the 24h fallback timer finally expired.
+		s.warnUnconfigured()
+		return 24 * time.Hour
+	}
+	s.noteConfigured()
 
 	now := time.Now()
 	s.stateMu.Lock()

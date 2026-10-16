@@ -21,35 +21,66 @@ func NewProcessorService() *ProcessorService {
 	return &ProcessorService{}
 }
 
-func (s *ProcessorService) MapProcessingSettings(settings *photoframe.ProcessingSettings, palette *photoframe.Palette) map[string]string {
+func (s *ProcessorService) MapProcessingSettings(settings *photoframe.ProcessingSettings, palette *photoframe.Palette, grayscale bool) map[string]string {
 	opts := make(map[string]string)
-	if settings == nil {
-		return opts
+
+	// Tone/dither options come from the device's stored settings. When settings
+	// are absent (e.g. a push to a device that never saved any), emit none and
+	// let the CLI use its sane defaults -- emitting zeros here would, for
+	// example, force exposure/contrast to 0 and render a black image. The
+	// palette below is still emitted so a grayscale panel dithers to gray.
+	if settings != nil {
+		opts["exposure"] = fmt.Sprintf("%v", settings.Exposure)
+		opts["saturation"] = fmt.Sprintf("%v", settings.Saturation)
+		if settings.ToneMode != "" {
+			opts["tone-mode"] = settings.ToneMode
+		}
+		opts["contrast"] = fmt.Sprintf("%v", settings.Contrast)
+		if settings.ToneMode == "scurve" {
+			opts["scurve-strength"] = fmt.Sprintf("%v", settings.Strength)
+			opts["scurve-shadow"] = fmt.Sprintf("%v", settings.ShadowBoost)
+			opts["scurve-highlight"] = fmt.Sprintf("%v", settings.HighlightCompress)
+			opts["scurve-midpoint"] = fmt.Sprintf("%v", settings.Midpoint)
+		}
+		if settings.ColorMethod != "" {
+			opts["color-method"] = settings.ColorMethod
+		}
+		if settings.DitherAlgorithm != "" {
+			opts["dither-algorithm"] = settings.DitherAlgorithm
+		}
+		// Both branches are needed: the CLI's default preset (balanced) has
+		// compression on, so omitting the flag does not turn it off.
+		if settings.CompressDynamicRange {
+			opts["compress-dynamic-range"] = "" // Boolean flag
+		} else {
+			opts["no-compress-dynamic-range"] = ""
+		}
+		// Device-synced layout (firmware >= scaleMode support); overrides the
+		// legacy per-device display_mode the caller may have set
+		if settings.ScaleMode != "" {
+			opts["scale-mode"] = settings.ScaleMode
+		}
+		if settings.BackgroundColor != "" {
+			opts["background-color"] = settings.BackgroundColor
+		}
 	}
 
-	opts["exposure"] = fmt.Sprintf("%v", settings.Exposure)
-	opts["saturation"] = fmt.Sprintf("%v", settings.Saturation)
-	if settings.ToneMode != "" {
-		opts["tone-mode"] = settings.ToneMode
-	}
-	opts["contrast"] = fmt.Sprintf("%v", settings.Contrast)
-	if settings.ToneMode == "scurve" {
-		opts["scurve-strength"] = fmt.Sprintf("%v", settings.Strength)
-		opts["scurve-shadow"] = fmt.Sprintf("%v", settings.ShadowBoost)
-		opts["scurve-highlight"] = fmt.Sprintf("%v", settings.HighlightCompress)
-		opts["scurve-midpoint"] = fmt.Sprintf("%v", settings.Midpoint)
-	}
-	if settings.ColorMethod != "" {
-		opts["color-method"] = settings.ColorMethod
-	}
-	if settings.DitherAlgorithm != "" {
-		opts["dither-algorithm"] = settings.DitherAlgorithm
-	}
-	if settings.CompressDynamicRange {
-		opts["compress-dynamic-range"] = "" // Boolean flag
-	}
-
-	if palette != nil {
+	if grayscale {
+		// GC16: the whole gray palette (theoretical output ramp + the calibrated
+		// perceived ramp) lives in epaper-image-convert -- we never hardcode a
+		// gray ramp here. If the device reported its measured luminance endpoints
+		// (Y of full black/white), pass them so the CLI derives the panel's
+		// perceived ramp; otherwise fall back to the built-in grayscale16 preset.
+		if palette != nil && palette.BlackY != nil && palette.WhiteY != nil {
+			opts["gray-black-y"] = fmt.Sprintf("%v", *palette.BlackY)
+			opts["gray-white-y"] = fmt.Sprintf("%v", *palette.WhiteY)
+			if palette.Gamma != nil {
+				opts["gray-gamma"] = fmt.Sprintf("%v", *palette.Gamma)
+			}
+		} else {
+			opts["palette-preset"] = "grayscale16"
+		}
+	} else if palette != nil {
 		paletteWrapper := map[string]interface{}{
 			"theoretical": map[string]interface{}{
 				"black":  map[string]int{"r": 0, "g": 0, "b": 0},
