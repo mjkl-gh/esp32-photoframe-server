@@ -36,7 +36,8 @@ jobs:
 
       - name: Read add-on version
         id: version
-        run: echo "value=$(sed -n 's/^version: *"\(.*\)"/\1/p' config.yaml)" >> "$GITHUB_OUTPUT"
+        run: |
+          echo "value=$(sed -n 's/^version: *"\(.*\)"/\1/p' config.yaml)" >> "$GITHUB_OUTPUT"
 
       - name: Generate image metadata
         id: meta
